@@ -74,7 +74,7 @@ Each organization has one code repository per project, except for most SDK repos
 
 ### Check first
 
-To save time and prevent duplicating work, it’s best to search the relevant project (repository) for open or closed issues or PRs related to your contribution. This is especially important for significant changes or enhancements.
+To save time and prevent duplicating work, it’s best to search the relevant project (repository) for open/closed issues or PRs related to your contribution. This is especially important for significant changes or enhancements.
 
 **You might also check in the [Kinde community](#community) to see if an issue has a discussion history.**
 
@@ -234,9 +234,9 @@ Join us in the [Slack](https://slack.com/intl/en-au) [Kinde community](https://j
 
 ### Where to post
 
-| Slack channel                                                                      | For                                  |
-| ---------------------------------------------------------------------------------- | ------------------------------------ |
-| [#requests-and-feedback](https://thekindecommunity.slack.com/archives/C04K34HUV9B) | Feature requests + product feedback  |
-| [#questions](https://thekindecommunity.slack.com/archives/C04KVMGSZLG)             | General questions                    |
-| [#kinde-support](https://thekindecommunity.slack.com/archives/C04K316BXEH)         | Support questions and reporting bugs |
-| [#documentation](https://thekindecommunity.slack.com/archives/C057M2BQ6LV)         | Reporting documentation issues       |
+| Slack channel | For |
+| --- | --- |
+| [#requests-and-feedback](https://thekindecommunity.slack.com/archives/C04K34HUV9B) | Feature requests + product feedback |
+| [#questions](https://thekindecommunity.slack.com/archives/C04KVMGSZLG) | General questions |
+| [#kinde-support](https://thekindecommunity.slack.com/archives/C04K316BXEH) | Support questions and reporting bugs |
+| [#documentation](https://thekindecommunity.slack.com/archives/C057M2BQ6LV) | Reporting documentation issues |

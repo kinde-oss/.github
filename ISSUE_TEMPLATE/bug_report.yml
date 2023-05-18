@@ -1,0 +1,86 @@
+name: '🐛 Bug report'
+description: Have you found a bug or issue in a Kinde library? Let us know here.
+title: 'Bug: (fill in)'
+labels: [bug]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a bug 👍🏼.
+
+        Please fill out each section below, as it allows the core team to diagnose and hopefully fix your issue as quickly as possible.
+
+        **Please do not report security vulnerabilities here**. Refer to the [Kinde vulnerability disclosure policy](https://kinde.com/docs/important-information/vulnerability-disclosure-policy/).
+
+  - type: checkboxes
+    attributes:
+      label: Prerequisites
+      description: To save time and prevent duplicating work, please complete the following.
+      options:
+        - label: I have searched the repository’s issues and [Kinde community](https://thekindecommunity.slack.com/archives/C04K316BXEH) to ensure my issue isn’t a duplicate
+          required: true
+        - label: I have checked the latest version of the library to replicate my issue
+          required: true
+        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CONTRIBUTING.md)
+          required: true
+        - label: I agree to the terms within the [code of conduct](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CODE_OF_CONDUCT.md)
+          required: true
+
+  - type: textarea
+    attributes:
+      label: Describe the issue
+      description: Provide a summary of the issue and what you expected to happen, including specific steps to reproduce.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Library URL
+      description: The library’s repository URL, e.g., “https://github.com/kinde-oss/kinde-auth-react”.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Library version
+      description: The library’s version number, e.g., “3.0.15”.
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Operating system(s)
+      description: What operating system(s) are you using?
+      options:
+        - Windows
+        - macOS
+        - Android
+        - iOS
+        - Ubuntu
+        - Other Linux
+        - Other (see “Further environment details”)
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Operating system version(s)
+      description: What operating system version(s) are you using? E.g. “Windows 10 version 1909”, “macOS Catalina 10.15.7”, “Ubuntu 20.04”, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Further environment details
+      description: Any further environment details you think are relevant and helpful for the core team to know. E.g., your browser name and version, e.g., “Chrome v102”, “Firefox v98”. Your technology/framework name and version, e.g., “Node.js v20.2.0”, “Next.js v13.4.2”, etc. Other operating systems not listed above.
+
+  - type: input
+    attributes:
+      label: Reproducible test case URL
+      description: The URL for a standalone test case - a minimal reproduction of the problem. It could be a link to a code playground like [StackBlitz](https://stackblitz.com/), [JSFiddle](https://jsfiddle.net/), [CodeSandbox](https://codesandbox.io/), or a GitHub repo. A minimal reproduction is desirable so others can help debug your issue and is **the best way** to ensure it gets triaged quickly by the core team.
+
+  - type: textarea
+    attributes:
+      label: Additional information
+      description: Is there anything else that’s important for the core team to know?

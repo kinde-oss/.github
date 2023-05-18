@@ -1,0 +1,38 @@
+name: '📖 Documentation issue'
+description: Have you found a mistake in the [Kinde SDK documentation](https://kinde.com/docs/developer-tools), or have a suggestion to improve them? Let us know here.
+title: 'Documentation issue: (fill in)'
+labels: [documentation]
+
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for taking the time to report a documentation issue 👍🏼.
+
+  - type: checkboxes
+    attributes:
+      label: Prerequisites
+      description: To save time and prevent duplicating work, please complete the following.
+      options:
+        - label: I have searched the repository’s issues and the [Kinde community](https://thekindecommunity.slack.com/archives/C057M2BQ6LV) to ensure my documentation issue isn’t a duplicate
+          required: true
+        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CONTRIBUTING.md)
+          required: true
+        - label: I agree to the terms in the [code of conduct](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CODE_OF_CONDUCT.md)
+          required: true
+
+  - type: textarea
+    attributes:
+      label: What is the improvement or update you wish to see?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Is there any context that might help us understand?
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Document URL
+      description: If the document already exists, please include its URL. E.g. “https://kinde.com/docs/developer-tools/javascript-sdk”.
