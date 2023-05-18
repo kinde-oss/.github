@@ -1,6 +1,6 @@
 # Hi there 👋
 
-Here you'll find SDKs and libraries for a bunch of different technologies to work with the Kinde ecosystem.
+Here you’ll find SDKs and libraries for a bunch of different technologies to work with the Kinde ecosystem.
 
 If you have an existing project, this is a great place to get started.
 
