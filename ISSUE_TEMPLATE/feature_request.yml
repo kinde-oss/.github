@@ -1,0 +1,38 @@
+name: '💡 Feature request'
+description: Would you like to see a new capability in a Kinde library? Let us know here.
+title: 'Feature request: (fill in)'
+labels: [enhancement]
+
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for taking the time to request a feature 👍🏼.
+
+  - type: checkboxes
+    attributes:
+      label: Prerequisites
+      description: To save time and prevent duplicating work, please complete the following.
+      options:
+        - label: I have searched the repository’s issues and [Kinde community](https://thekindecommunity.slack.com/archives/C04K34HUV9B) to ensure my feature request isn’t a duplicate
+          required: true
+        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CONTRIBUTING.md)
+          required: true
+        - label: I agree to the terms in the [code of conduct](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CODE_OF_CONDUCT.md)
+          required: true
+
+  - type: textarea
+    attributes:
+      label: What is the problem you’re trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What solution would you like to see?
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Additional information
+      description: Is there anything else that’s important for the core team to know?

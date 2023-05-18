@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: '🙋🏽‍♀️ Questions and help'
+    url: https://thekindecommunity.slack.com
+    about: For any questions, discussions, or general help, please ask in the Kinde community.
+  - name: '📖 SDK documentation'
+    url: https://kinde.com/docs
+    about: View the documentation for all of the Kinde SDKs.
+  - name: '🚨 Security vulnerability'
+    url: https://kinde.com/docs/important-information/vulnerability-disclosure-policy
+    about: Privately report a security vulnerability.
