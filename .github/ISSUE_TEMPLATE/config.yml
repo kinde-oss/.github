@@ -6,6 +6,3 @@ contact_links:
   - name: '📖 SDK documentation'
     url: https://kinde.com/docs
     about: View the documentation for all of the Kinde SDKs.
-  - name: '🚨 Security vulnerability'
-    url: https://kinde.com/docs/important-information/vulnerability-disclosure-policy
-    about: Privately report a security vulnerability.

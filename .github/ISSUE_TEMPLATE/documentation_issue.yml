@@ -1,12 +1,12 @@
 name: '📖 Documentation issue'
-description: Have you found a mistake in the [Kinde SDK documentation](https://kinde.com/docs/developer-tools), or have a suggestion to improve them? Let us know here.
+description: Have you found a mistake in the Kinde SDK documentation, or have a suggestion to improve them? Let us know here.
 title: 'Documentation issue: (fill in)'
 labels: [documentation]
 
 body:
   - type: markdown
     attributes:
-      value: Thank you for taking the time to report a documentation issue 👍🏼.
+      value: Thank you for taking the time to report a [Kinde SDK documentation](https://kinde.com/docs/developer-tools) issue 👍🏼.
 
   - type: checkboxes
     attributes:
@@ -22,17 +22,19 @@ body:
 
   - type: textarea
     attributes:
-      label: What is the improvement or update you wish to see?
+      label: How can we improve the docs or what is missing?
+      description: For example, are some components not listed or did you want more examples.
     validations:
       required: true
 
   - type: textarea
     attributes:
-      label: Is there any context that might help us understand?
+      label: Provide extra context, such as what you were trying to do and your requirements
+      description: This will help us understand how we can best update the docs.
     validations:
       required: true
 
   - type: input
     attributes:
-      label: Document URL
-      description: If the document already exists, please include its URL. E.g. “https://kinde.com/docs/developer-tools/javascript-sdk”.
+      label: If the docs page already exists, please provide a link
+      description: E.g. “https://kinde.com/docs/developer-tools/javascript-sdk”.
