@@ -6,7 +6,7 @@ labels: [enhancement]
 body:
   - type: markdown
     attributes:
-      value: Thank you for taking the time to request a feature 👍🏼.
+      value: Thank you for taking the time to request a new feature 👍🏼.
 
   - type: checkboxes
     attributes:

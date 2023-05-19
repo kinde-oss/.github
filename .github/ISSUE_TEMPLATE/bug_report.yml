@@ -73,7 +73,7 @@ body:
   - type: textarea
     attributes:
       label: Further environment details
-      description: Any further environment details you think are relevant and helpful for the core team to know. E.g., your browser name and version, e.g., “Chrome v102”, “Firefox v98”. Your technology/framework name and version, e.g., “Node.js v20.2.0”, “Next.js v13.4.2”, etc. Other operating systems not listed above.
+      description: Any further environment details you think are relevant and helpful for the core team to know. E.g., your browser name and version, e.g., “Chrome v102”. Your technology or framework name and version, e.g., “Node.js v20.2.0”. Other operating systems that are not listed above.
 
   - type: input
     attributes:
