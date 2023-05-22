@@ -153,7 +153,7 @@ Please follow these guidelines to create tidy PRs.
 
 - Keep your PR focused in scope - it should address a single concern using the fewest changed lines possible.
 - Ensure your PR does not contain any unrelated commits. For related commits, please provide clear log messages.
-- Help your reviewers understand the changes in your PR by providing a clear and concise description. If there’s an accompanying issue, link to it via GitHub’s [Referencing issues and pull requests](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#referencing-issues-and-pull-requests) feature.
+- Help reviewers understand the changes in your PR by providing a clear and concise description. If there’s an accompanying issue, link to it via GitHub’s [Referencing issues and pull requests](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#referencing-issues-and-pull-requests) feature (you can omit an explanation if the issue has enough detail for a reviewer to understand your changes fully).
 - Add tests for fixed or changed functionality if a test suite exists.
 - Follow the code style guide if one. Projects may use tools like [Prettier](https://prettier.io/) to apply a style guide automatically. Most projects also have “lint” tasks, such as `npm run lint` for npm libraries. If there is a lint task, please run it before submitting your PR.
 - As you update your PR and apply changes, mark each conversation as resolved via GitHub’s [Resolving conversations](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/reviewing-changes-in-pull-requests/commenting-on-a-pull-request#resolving-conversations) feature.
@@ -228,7 +228,7 @@ By contributing to Kinde, you agree that your contributions will be licensed und
 
 ## Community
 
-Join us in the [Slack](https://slack.com/intl/en-au) [Kinde community](https://join.slack.com/t/thekindecommunity/shared_invite/zt-1pwhkx0gg-se1H8nY9Y8CwAY6Ppzi~Nw) and post your questions there. A friendly Kinde staff member is always happy to help, and it might save you a lot of time.
+Join us in the Slack [Kinde community](https://thekindecommunity.slack.com) and post your questions there. A friendly Kinde staff member is always happy to help, and it might save you a lot of time.
 
 **Note:** please submit your general or support-related questions in the Kinde community rather than on GitHub.
 
