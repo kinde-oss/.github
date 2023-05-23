@@ -2,7 +2,7 @@
   <a href="https://kinde.com" target="_blank" rel="noopener noreferrer">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="kinde_logo_dark.jpg">
-      <img src="kinde_logo_light.jpg" height="100">
+      <img src="../kinde_logo_light.jpg" height="100">
     </picture>
   </a>
 </p>
@@ -28,6 +28,7 @@
 - [New repositories](#new-repositories)
   - [READMEs](#readmes)
   - [Community health files](#community-health-files)
+  - [SDK repository name](#sdk-repository-name)
 - [SDKs](#sdks)
   - [Mustache templates](#mustache-templates)
     - [TypeScript example](#typescript-example)
@@ -179,7 +180,11 @@ Please follow the README template to avoid duplicating documentation between the
 
 ### Community health files
 
-Please refrain from adding [community health files](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file), e.g. `CONTRIBUTING.md`, `SECURITY.md`, etc. (any of the files listed [here](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file#supported-file-types)) to the repository’s `.github` folder as Kinde houses these globally in the GitHub organization `.github` repository to avoid duplication and ease of maintenance. If a community health file gets added to a repository, it will override the global health files, which we want to avoid.
+Please refrain from adding [community health files](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file), e.g. `CONTRIBUTING.md`, `SECURITY.md`, etc. (any of the files listed [here](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file#supported-file-types)) to the repository’s `.github` folder (or in the root or `docs` folder) as Kinde houses these globally in the GitHub organization `.github` repository to avoid duplication and ease of maintenance. If a community health file gets added to a repository, it will override the global health files, which we want to avoid.
+
+### SDK repository name
+
+For the name of an SDK repository, please use the following format: `kinde-[technology/framework name]`, e.g. `kinde-react` or `kinde-elixir`. For generator repositories (see [SDKs](#sdkds) to learn more), add “generator” at the end, e.g. `kinde-react-generator` or `kinde-elixir-generator`.
 
 ## SDKs
 
