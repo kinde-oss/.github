@@ -2,7 +2,7 @@
   <a href="https://kinde.com" target="_blank" rel="noopener noreferrer">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="kinde_logo_dark.jpg">
-      <img src="kinde_logo_light.jpg" height="100">
+      <img src="../kinde_logo_light.jpg" height="100">
     </picture>
   </a>
 </p>
@@ -25,6 +25,10 @@
   - [Creating a PR](#creating-a-pr)
   - [Guidelines](#guidelines-1)
   - [Your PR merges!](#your-pr-merges)
+- [New repositories](#new-repositories)
+  - [READMEs](#readmes)
+  - [Community health files](#community-health-files)
+  - [SDK repository name](#sdk-repository-name)
 - [SDKs](#sdks)
   - [Mustache templates](#mustache-templates)
     - [TypeScript example](#typescript-example)
@@ -164,6 +168,24 @@ Awesome! Thanks so much for contributing to a Kinde OS project.
 
 Once your PR merges, your contributions are publicly visible in the relevant project and will be reflected in the project’s changelog.
 
+## New repositories
+
+Please always create new repositories from the relevant template to ensure consistency across Kinde repositories.
+
+When you create a new repository, GitHub will provide a list of available templates. For example, when you create a new [SDK](#sdks) repository, choose the `kinde-oss-repo-template` template. Once the new repository gets created, complete the checklist in the `_NEW_REPO_CHECKLIST_.md` file.
+
+### READMEs
+
+Please follow the README template to avoid duplicating documentation between the [Kinde docs](https://kinde.com/docs/) and a project’s README and to keep Kinde READMEs consistent.
+
+### Community health files
+
+Please refrain from adding [community health files](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file), e.g. `CONTRIBUTING.md`, `SECURITY.md`, etc. (any of the files listed [here](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file#supported-file-types)) to the repository’s `.github` folder (or in the root or `docs` folder) as Kinde houses these globally in the GitHub organization `.github` repository to avoid duplication and ease of maintenance. If a community health file gets added to a repository, it will override the global health files, which we want to avoid.
+
+### SDK repository name
+
+For the name of an SDK repository, please use the following format: `kinde-[technology/framework name]`, e.g. `kinde-react` or `kinde-elixir`. For generator repositories (see [SDKs](#sdkds) to learn more), add “generator” at the end, e.g. `kinde-react-generator` or `kinde-elixir-generator`.
+
 ## SDKs
 
 Most of Kinde’s OS projects are comprised of software development kits (SDKs) that are generated using the [OpenAPI Generator tool](https://openapi-generator.tech/). As a result, each SDK has two repositories: one for the generator and one for the end code. For example, the Ruby SDK has the following repositories:
@@ -206,7 +228,7 @@ export * from './client/client'; /* This line was added */
 
 ## Documentation
 
-To avoid duplicating documentation between the [Kinde docs](https://kinde.com/docs/) and a project’s README, we prefer to link to the Kinde docs when possible.
+To avoid duplicating documentation between the [Kinde docs](https://kinde.com/docs/) and a project’s README, Kinde prefers to link to the Kinde docs when possible.
 
 If you encounter problems with the [Kinde docs](https://kinde.com/docs/), believe something is missing or unclear, or spot a typo, please submit an [issue](#issues) via the “Documentation issues” template.
 
@@ -228,9 +250,9 @@ By contributing to Kinde, you agree that your contributions will be licensed und
 
 ## Community
 
-Join us in the Slack [Kinde community](https://thekindecommunity.slack.com) and post your questions there. A friendly Kinde staff member is always happy to help, and it might save you a lot of time.
+Join us in the Slack [Kinde community](https://thekindecommunity.slack.com) and post your questions there. The whole Kinde team is on hand to help you out.
 
-**Note:** please submit your general or support-related questions in the Kinde community rather than on GitHub.
+**Note:** Please submit your general or support-related questions in the Kinde community rather than on GitHub.
 
 ### Where to post
 
