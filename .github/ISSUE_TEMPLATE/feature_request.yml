@@ -15,9 +15,9 @@ body:
       options:
         - label: I have searched the repository’s issues and [Kinde community](https://thekindecommunity.slack.com/archives/C04K34HUV9B) to ensure my feature request isn’t a duplicate
           required: true
-        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CONTRIBUTING.md)
+        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/main/.github/CONTRIBUTING.md)
           required: true
-        - label: I agree to the terms in the [code of conduct](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CODE_OF_CONDUCT.md)
+        - label: I agree to the terms in the [code of conduct](https://github.com/kinde-oss/.github/blob/main/.github/CODE_OF_CONDUCT.md)
           required: true
 
   - type: textarea
