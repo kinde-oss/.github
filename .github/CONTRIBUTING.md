@@ -2,7 +2,7 @@
   <a href="https://kinde.com" target="_blank" rel="noopener noreferrer">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="kinde_logo_dark.jpg">
-      <img src="../kinde_logo_light.jpg" height="100">
+      <img src="https://raw.githubusercontent.com/kinde-oss/.github/main/kinde_logo_light.jpg" height="100">
     </picture>
   </a>
 </p>
@@ -80,7 +80,7 @@ Each organization has one code repository per project, except for most SDK repos
 
 To save time and prevent duplicating work, it’s best to search the relevant project (repository) for open/closed issues or PRs related to your contribution. This is especially important for significant changes or enhancements.
 
-**You might also check in the [Kinde community](#community) to see if an issue has a discussion history.**
+**You might also check in the [Kinde community](#community) to see if an issue has a discussion history or the [public roadmap](https://updates.kinde.com/board) for planned enhancements.**
 
 ### First time
 
@@ -101,7 +101,7 @@ Issues is where everything gets logged against a project, including:
 - Bug reports
 - Documentation issues
 
-Issues should be the first port of call alongside the [Kinde community](#community) when considering contributing to a Kinde OS project.
+Issues should be the first port of call alongside the [Kinde community](#community) and [public roadmap](https://updates.kinde.com/board) when considering contributing to a Kinde OS project.
 
 🎓 You can read more about issues in [GitHub Docs](https://docs.github.com/en) → [GitHub Issues](https://docs.github.com/en/issues).
 
@@ -240,7 +240,7 @@ If you discover a security vulnerability in a Kinde OS project, please report it
 
 ## Publishing
 
-The core team is in charge of handling version updates and publishing. We’re currently working on updating the documentation for this, and it should be available soon.
+The core team is in charge of handling version updates and publishing. Typically, the publishing instructions will be in the repository's README.
 
 Kinde OS projects adhere to the [Semantic Versioning standard](https://semver.org/), and we strive to ensure that changelogs are available for each project.
 

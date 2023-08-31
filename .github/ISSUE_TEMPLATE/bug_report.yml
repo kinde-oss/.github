@@ -22,9 +22,9 @@ body:
           required: true
         - label: I have checked the latest version of the library to replicate my issue
           required: true
-        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CONTRIBUTING.md)
+        - label: I have read the [contributing guidelines](https://github.com/kinde-oss/.github/blob/main/.github/CONTRIBUTING.md)
           required: true
-        - label: I agree to the terms within the [code of conduct](https://github.com/kinde-oss/.github/blob/489e2ca9c3307c2b2e098a885e22f2239116394a/CODE_OF_CONDUCT.md)
+        - label: I agree to the terms within the [code of conduct](https://github.com/kinde-oss/.github/blob/main/.github/CODE_OF_CONDUCT.md)
           required: true
 
   - type: textarea
