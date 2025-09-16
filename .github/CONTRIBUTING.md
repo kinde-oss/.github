@@ -259,6 +259,5 @@ Join us in the Slack [Kinde community](https://thekindecommunity.slack.com) and 
 | Slack channel | For |
 | --- | --- |
 | [#requests-and-feedback](https://thekindecommunity.slack.com/archives/C04K34HUV9B) | Feature requests + product feedback |
-| [#questions](https://thekindecommunity.slack.com/archives/C04KVMGSZLG) | General questions |
 | [#kinde-support](https://thekindecommunity.slack.com/archives/C04K316BXEH) | Support questions and reporting bugs |
 | [#documentation](https://thekindecommunity.slack.com/archives/C057M2BQ6LV) | Reporting documentation issues |
