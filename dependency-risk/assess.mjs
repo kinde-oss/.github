@@ -95,15 +95,26 @@ async function main() {
 
   let model;
   if (!context.trim() || (!facts.packages.length && !facts.newPackages.length && !facts.actions.length)) {
-    model = { verdict: 'low', summary: 'No npm or GitHub Action version changes detected in this PR.', findings: [] };
+    model = {
+      verdict: 'low',
+      summary: facts.flags.length
+        ? 'No npm package or GitHub Action version changes to review, but this PR changes things the check cannot analyse (see below).'
+        : 'No npm or GitHub Action version changes detected in this PR.',
+      findings: [],
+    };
   } else {
     try { model = await askModel(context); }
     catch (e) { model = { verdict: 'high', summary: `AI review failed, so this fails closed: ${e.message}`, findings: [] }; }
   }
 
-  // Deterministic floor: flags from registry metadata can raise the verdict.
+  // Deterministic floor: flags from registry metadata can raise the verdict, and so can the
+  // model's own findings (the schema can't stop it pairing "low" with a high-severity finding).
   let verdict = model.verdict;
   for (const f of facts.flags) if (RANK[f.severity] > RANK[verdict]) verdict = f.severity;
+  for (const f of model.findings) {
+    const sev = f?.severity in RANK ? f.severity : 'high';
+    if (RANK[sev] > RANK[verdict]) verdict = sev;
+  }
   if (facts.truncated && verdict === 'low') verdict = 'medium';
 
   const result = { verdict, modelVerdict: model.verdict, model: MODEL, summary: model.summary, findings: model.findings, flags: facts.flags, truncated: facts.truncated };

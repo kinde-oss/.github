@@ -1,6 +1,10 @@
 # dependency-risk
 
-An AI and metadata review of Renovate PRs. It runs as a required check, so Renovate only auto-merges non-major updates that come back **low** risk.
+An AI and metadata review of Renovate PRs. It runs as a required check, so Renovate only auto-merges updates that come back **low** risk.
+
+The check doesn't look at the update type. Keeping major and `0.x` updates out of auto-merge is the job of the [`kinde-oss/renovate-config`](https://github.com/kinde-oss/renovate-config) preset, so a repo that doesn't extend it (or set an equivalent rule) can auto-merge a major update that comes back low.
+
+It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` refs. Any other change in a Renovate PR (npm or yarn lockfiles, Dockerfiles, `go.mod`, `pnpm-workspace.yaml` catalogs, `.nvmrc`, ...) comes back **medium** and needs a human.
 
 ## How it decides
 
@@ -19,8 +23,12 @@ An AI and metadata review of Renovate PRs. It runs as a required check, so Renov
    - new package with install scripts → high
    - publisher changed → medium
    - new GitHub Action → medium
+   - changed files the check can't analyse → medium
+   - `package.json` changed outside its dependency fields (`packageManager`, `engines`, `overrides`, `scripts`, ...) → medium
+   - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
+   - lockfile resolution or integrity changed without a version change → medium
 3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.
-   - The final verdict is the **higher** of the model's verdict and the flags.
+   - The final verdict is the **highest** of the model's verdict, the severity of each of its findings, and the flags.
    - A truncated context can't be judged low.
    - Any error (API down, bad output, crash) counts as **high**.
 4. The workflow posts one sticky PR comment, labels anything that isn't low with `needs-human`, and fails the check.
@@ -33,7 +41,8 @@ Review the PR, add the `risk-accepted` label, then use **Re-run jobs** on the fa
 
 1. Copy `workflow-templates/dependency-risk.yml` into the repo as `.github/workflows/dependency-risk.yml`. It also appears under **Actions → New workflow** for every repo in the org.
 2. Make sure the `ANTHROPIC_API_KEY` org secret is available to the repo.
-3. After the first run, add **`dependency-risk / assess`** as a required status check in the branch ruleset.
+3. Extend the shared preset in the repo's `renovate.json` (`"extends": ["github>kinde-oss/renovate-config"]`). It is what keeps majors and `0.x` updates from auto-merging.
+4. After the first run, add **`dependency-risk / assess`** as a required status check in the branch ruleset.
 
 ## Inputs
 

@@ -43,6 +43,24 @@ export function parsePnpmLock(text) {
   return out;
 }
 
+// Collect "name@version(peers)" -> resolution (tarball/integrity) from the `packages:` section,
+// so a changed resolution for an unchanged version is caught.
+export function pnpmResolutions(text) {
+  const out = new Map();
+  let inPackages = false, key = null, cont = false;
+  for (const line of text.split('\n')) {
+    if (/^\S/.test(line)) { inPackages = line.startsWith('packages:'); key = null; cont = false; continue; }
+    if (!inPackages) continue;
+    const k = line.match(/^ {2}(\S.*?):\s*$/);
+    if (k) { key = k[1].replace(/^['"]|['"]$/g, ''); cont = false; continue; }
+    const r = line.match(/^ {4}resolution:\s*(.*)$/);
+    if (key && r) { out.set(key, r[1].trim()); cont = !r[1].trim(); continue; }
+    if (cont && key && /^ {6}\S/.test(line)) { out.set(key, out.get(key) + line.trim() + ';'); continue; }
+    cont = false;
+  }
+  return out;
+}
+
 const cmpSemver = (a, b) => {
   const pa = a.split(/[.+-]/).map(x => (isNaN(+x) ? x : +x));
   const pb = b.split(/[.+-]/).map(x => (isNaN(+x) ? x : +x));
@@ -99,11 +117,14 @@ function npmDiff(name, from, to) {
 }
 
 // ---------- GitHub Actions ----------
+const USES_RE = /^([+-])\s*-?\s*uses:\s*['"]?([^@\s'"]+)@([^\s'"#]+)['"]?\s*(?:#\s*(\S+))?/;
+const reviewableUse = m => m && !m[2].startsWith('./') && !m[2].startsWith('docker://');
+
 export function parseActionChanges(patch) {
   const removed = new Map(), added = new Map();
   for (const line of patch.split('\n')) {
-    const m = line.match(/^([+-])\s*-?\s*uses:\s*['"]?([^@\s'"]+)@([^\s'"#]+)['"]?\s*(?:#\s*(\S+))?/);
-    if (!m || m[2].startsWith('./') || m[2].startsWith('docker://')) continue;
+    const m = line.match(USES_RE);
+    if (!reviewableUse(m)) continue;
     const [, sign, action, ref, comment] = m;
     (sign === '-' ? removed : added).set(action, { ref, tag: comment ?? null });
   }
@@ -113,6 +134,18 @@ export function parseActionChanges(patch) {
     if (!from || from.ref !== to.ref) changes.push({ action, from: from ?? null, to });
   }
   return changes;
+}
+
+// Changed workflow lines that aren't a reviewable `uses: owner/repo@ref` (docker:// images,
+// local actions, run steps, permissions, ...). Blank and comment-only lines are ignored.
+export function unreviewedWorkflowLines(patch) {
+  return patch.split('\n')
+    .filter(l => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l))
+    .filter(l => {
+      const body = l.slice(1).trim();
+      if (!body || body.startsWith('#')) return false;
+      return !reviewableUse(l.match(USES_RE));
+    });
 }
 
 async function actionCompare(action, from, to) {
@@ -140,19 +173,37 @@ async function main() {
   const facts = { packages: [], newPackages: [], actions: [], flags: [], changedFiles: changed };
   const sections = [];
 
+  // Anything this collector can't analyse must not pass as "low" just because nothing was found.
+  // Understood: pnpm lockfiles, package.json next to a lockfile change, and workflow/action files
+  // (whose non-`uses:` lines are flagged separately below).
+  const wf = changed.filter(f => /^\.github\/(workflows\/.*\.ya?ml|actions\/.*action\.ya?ml)$/.test(f) || /(^|\/)action\.ya?ml$/.test(f));
+  const lockChanged = changed.some(f => f.endsWith('pnpm-lock.yaml'));
+  const unknown = changed.filter(f => !(f.endsWith('pnpm-lock.yaml') || (lockChanged && f.endsWith('package.json')) || wf.includes(f)));
+  if (unknown.length) {
+    const list = unknown.slice(0, 10).join(', ') + (unknown.length > 10 ? ` (+${unknown.length - 10} more)` : '');
+    facts.flags.push({ severity: 'medium', package: list, reason: 'changed files this check cannot analyse (only pnpm lockfiles, package.json and workflow uses: refs are reviewed)' });
+  }
+
   // Direct dependency changes from package.json files
+  const DEP_KEYS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+  const withoutDeps = p => JSON.stringify(Object.fromEntries(Object.entries(p).filter(([k]) => !DEP_KEYS.includes(k))));
   const direct = new Set();
   for (const f of changed.filter(f => f.endsWith('package.json'))) {
     const o = JSON.parse(gitShow(baseSha, f) || '{}');
     const n = JSON.parse(gitShow(headSha, f) || '{}');
-    for (const key of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    for (const key of DEP_KEYS) {
       for (const [name, spec] of Object.entries(n[key] ?? {})) if (o[key]?.[name] !== spec) direct.add(name);
     }
+    if (withoutDeps(o) !== withoutDeps(n)) facts.flags.push({ severity: 'medium', package: f, reason: 'package.json changed outside dependency fields (e.g. packageManager, engines, overrides, scripts)' });
   }
 
   // Lockfile changes
   for (const f of changed.filter(f => f.endsWith('pnpm-lock.yaml'))) {
-    const { updated, added, removed } = diffLocks(parsePnpmLock(gitShow(baseSha, f)), parsePnpmLock(gitShow(headSha, f)));
+    const oldText = gitShow(baseSha, f), newText = gitShow(headSha, f);
+    const oldRes = pnpmResolutions(oldText), newRes = pnpmResolutions(newText);
+    const reResolved = [...newRes].filter(([k, v]) => oldRes.has(k) && oldRes.get(k) !== v).map(([k]) => k);
+    if (reResolved.length) facts.flags.push({ severity: 'medium', package: reResolved.slice(0, 10).join(', '), reason: 'lockfile resolution or integrity changed without a version change' });
+    const { updated, added, removed } = diffLocks(parsePnpmLock(oldText), parsePnpmLock(newText));
     updated.sort((a, b) => Number(direct.has(b.name)) - Number(direct.has(a.name)));
     sections.push(`## Lockfile ${f}\n- updated: ${updated.length}\n- newly added packages: ${added.length}\n- removed: ${removed.length}`);
 
@@ -193,9 +244,14 @@ async function main() {
   }
 
   // GitHub Actions changes
-  const wf = changed.filter(f => /^\.github\/(workflows\/.*\.ya?ml|actions\/.*action\.ya?ml)$/.test(f) || /(^|\/)action\.ya?ml$/.test(f));
   if (wf.length) {
-    const changes = parseActionChanges(git('diff', `${baseSha}...${headSha}`, '--', ...wf));
+    const patch = git('diff', `${baseSha}...${headSha}`, '--', ...wf);
+    const other = unreviewedWorkflowLines(patch);
+    if (other.length) {
+      facts.flags.push({ severity: 'medium', package: 'workflow files', reason: `${other.length} changed workflow line(s) other than action uses: refs (e.g. docker:// images, run steps)` });
+      sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join('\n'), LIMITS.perActionDiff) + '\n```');
+    }
+    const changes = parseActionChanges(patch);
     for (const c of changes) {
       facts.actions.push(c);
       if (!c.from) facts.flags.push({ severity: 'medium', package: c.action, reason: 'new GitHub Action introduced' });
