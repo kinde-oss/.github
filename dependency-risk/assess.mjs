@@ -131,7 +131,9 @@ async function main() {
     '',
     esc(model.summary),
     '',
-    `Scope: ${facts.packages.length} updated npm packages, ${facts.newPackages.length} new, ${facts.actions.length} GitHub Actions.` + (facts.truncated ? ' Context was truncated.' : ''),
+    `Scope: ${facts.packages.length} updated npm packages, ${facts.newPackages.length} new, ${facts.actions.length} GitHub Actions.` +
+      (facts.diffsTruncated ? ` ${facts.diffsTruncated} diff(s) were cut at the per-package limit.` : '') +
+      (facts.truncated ? ' Context was truncated.' : ''),
     rows.length ? '\n| Package | Severity | Reason | Source |\n| --- | --- | --- | --- |\n' + rows.join('\n') : '',
     '',
     verdict === 'low'
