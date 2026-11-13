@@ -29,7 +29,7 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
    - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
    - lockfile resolution or integrity changed without a version change → medium
    - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, or a new package's code is binary or over 20,000 characters) → medium
-   - a `package.json` dependency spec change that doesn't change that dependency's resolved version in its own lockfile importer → medium
+   - a `package.json` dependency spec change that doesn't move that dependency to a new resolved version in its own lockfile importer (including when the entry disappears) → medium
    - a dependency resolved to a non-registry or aliased version (`link:`, `file:`, git, `npm:` alias) → medium
    - an action ref removed with no replacement at the same site (a deleted step), or several refs for one action changed together so they can't be paired → medium
 3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.

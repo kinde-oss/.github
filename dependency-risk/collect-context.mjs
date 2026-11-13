@@ -455,7 +455,8 @@ async function main() {
   }
 
   // Each dependency spec change must move the resolved version of that dependency in that
-  // package's own lockfile importer. If it doesn't (only the specifier moved, an alias, a peer
+  // package's own lockfile importer to a version it still resolves. If it doesn't (only the
+  // specifier moved, the entry disappeared, an alias, a peer
   // dependency, a spec the lockfile doesn't reflect), the change is flagged. Matching per
   // importer stops an update elsewhere in the repo from masking it.
   const owningLock = f => {
@@ -476,7 +477,9 @@ async function main() {
     if (!own) return true;
     const before = importers(baseSha, own.lock).get(own.importer)?.get(name);
     const after = importers(headSha, own.lock).get(own.importer)?.get(name);
-    return before === after;
+    // No resolution after the change (e.g. moved to peerDependencies with auto-install-peers
+    // off) means there is no reviewed version for the new spec either.
+    return after === undefined || before === after;
   }).map(({ file, name }) => `${name} (${file})`);
   if (unmatched.length) facts.flags.push({ severity: 'medium', package: unmatched.slice(0, 10).join(', ') + (unmatched.length > 10 ? ` (+${unmatched.length - 10} more)` : ''), reason: 'dependency spec changed in package.json without its resolved version changing in that package\'s lockfile importer' });
 
