@@ -138,7 +138,8 @@ const diffFailed = d => d.startsWith('(npm diff failed');
 // Published code of a newly added package: file list, package.json and its entry file.
 // Downloads the tarball with scripts disabled and reads members with `tar -O`, so nothing
 // is unpacked to disk and symlinks inside the package are never followed.
-// Returns null when the code could not be read.
+// Returns null when the tarball could not be read, otherwise { text, inspected } where
+// inspected is false if the package ships executable files but no entry file was found.
 export function newPackageSource(name, version) {
   const dir = mkdtempSync(join(tmpdir(), 'dependency-risk-'));
   try {
@@ -164,8 +165,10 @@ export function newPackageSource(name, version) {
       .flatMap(p => [p, `${p}.js`, `${p}/index.js`])
       .map(p => `${root}/${p}`)
       .find(p => files.includes(p));
-    return `files:\n${truncate(listing, 2_000)}\npackage.json:\n${truncate(pkgText, 2_000)}\n` +
+    const executable = files.some(f => /\.([cm]?js|node|wasm)$/.test(f));
+    const text = `files:\n${truncate(listing, 2_000)}\npackage.json:\n${truncate(pkgText, 2_000)}\n` +
       (entry ? `${entry.slice(root.length + 1)}:\n${tar(entry)}` : '(no entry file found)');
+    return { text, inspected: Boolean(entry) || !executable };
   } catch {
     return null;
   } finally {
@@ -314,10 +317,10 @@ async function main() {
       if (Object.keys(entry.installScripts).length) facts.flags.push({ severity: 'high', package: a.name, reason: `newly added package has install scripts: ${Object.keys(entry.installScripts).join(', ')}` });
       facts.newPackages.push(entry);
       const src = i < LIMITS.maxNewPackagesInspected ? newPackageSource(a.name, a.version) : null;
-      if (src === null) notReviewed.push(`${a.name}@${a.version}`);
-      else if (src.length > LIMITS.perNewPackage) facts.diffsTruncated++;
+      if (!src?.inspected) notReviewed.push(`${a.name}@${a.version}`);
+      else if (src.text.length > LIMITS.perNewPackage) facts.diffsTruncated++;
       sections.push(`### NEW package ${a.name}@${a.version}\n- publisher: ${entry.publisher}\n- provenance: ${entry.provenance}\n- install scripts: ${JSON.stringify(entry.installScripts)}\n- description: ${entry.description}\n` +
-        (src === null ? '(published code not inspected)\n' : '```\n' + truncate(src, LIMITS.perNewPackage) + '\n```\n'));
+        (src === null ? '(published code not inspected)\n' : '```\n' + truncate(src.text, LIMITS.perNewPackage) + '\n```\n'));
     }
   }
 

@@ -28,7 +28,7 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
    - `package.json` changed outside its dependency fields (`packageManager`, `engines`, `overrides`, `scripts`, ...) → medium
    - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
    - lockfile resolution or integrity changed without a version change → medium
-   - an update whose published code never reached the model (past the 40-diff limit, or the diff, compare or tarball couldn't be fetched) → medium
+   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched, or a new package ships JavaScript but no entry file was found) → medium
 3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.
    - The final verdict is the **highest** of the model's verdict, the severity of each of its findings, and the flags.
    - A truncated context can't be judged low.
