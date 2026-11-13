@@ -1,0 +1,112 @@
+# Reusable workflow: AI + metadata risk review for Renovate PRs.
+# Call it from each repo (see workflow-templates/dependency-risk.yml) and make
+# "dependency-risk / assess" a required status check.
+name: dependency-risk
+
+on:
+  workflow_call:
+    inputs:
+      bot-login:
+        description: Login of the Renovate bot whose PRs get reviewed
+        type: string
+        default: renovate[bot]
+      model:
+        description: Claude model used for the review
+        type: string
+        default: claude-opus-5-5
+      tools-ref:
+        description: Ref of kinde-oss/.github to load the review scripts from
+        type: string
+        default: main
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  assess:
+    # PRs from anyone else skip this job, which counts as passing.
+    if: github.event.pull_request.user.login == inputs.bot-login
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: dependency-risk-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Check out PR (history only, nothing is installed or executed)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out review scripts
+        uses: actions/checkout@v4
+        with:
+          repository: kinde-oss/.github
+          ref: ${{ inputs.tools-ref }}
+          path: .dependency-risk-tools
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check for human override
+        id: override
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Read labels live (not from the event payload) so "Re-run job" picks up a newly added label.
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -q '.[].name' | grep -qx 'risk-accepted'; then
+            echo "accepted=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::risk-accepted label present, skipping review."
+          fi
+
+      - name: Collect dependency context
+        if: steps.override.outputs.accepted != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/risk"
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/risk/pr-body.md"
+          PR_BODY_FILE="$RUNNER_TEMP/risk/pr-body.md" node .dependency-risk-tools/dependency-risk/collect-context.mjs \
+            "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" "$RUNNER_TEMP/risk"
+
+      - name: Assess risk
+        if: steps.override.outputs.accepted != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ inputs.model }}
+        run: node .dependency-risk-tools/dependency-risk/assess.mjs "$RUNNER_TEMP/risk"
+
+      - name: Report and enforce
+        if: steps.override.outputs.accepted != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          dir="$RUNNER_TEMP/risk"
+          verdict=$(jq -r '.verdict // "high"' "$dir/risk.json" 2>/dev/null || echo high)
+          cat "$dir/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep one sticky comment per PR.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                -q '.[] | select(.body | startswith("<!-- dependency-risk -->")) | .id' | head -n1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$dir/comment.md" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@"$dir/comment.md" >/dev/null
+          fi
+
+          if [ "$verdict" = "low" ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/needs-human" >/dev/null 2>&1 || true
+            echo "Verdict: low"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/labels" -f name=needs-human -f color=d93f0b \
+              -f description="Dependency risk check needs a human review" >/dev/null 2>&1 || true
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -f "labels[]=needs-human" >/dev/null
+            echo "::error::Dependency risk verdict: $verdict. See the PR comment."
+            exit 1
+          fi
