@@ -9,7 +9,7 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
 ## How it decides
 
 1. **`collect-context.mjs`** compares the PR's base and head commits. It doesn't install or run anything.
-   - For `pnpm-lock.yaml`, it finds every updated and newly added package (direct and transitive) and pulls from the npm registry:
+   - For `pnpm-lock.yaml`, it finds every updated and newly added package (direct and transitive), including a workspace package moving to a version that was already in the lockfile, and pulls from the npm registry:
      - publisher
      - provenance
      - install scripts
@@ -30,6 +30,7 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
    - lockfile resolution or integrity changed without a version change → medium
    - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, or a new package's code is binary or over 20,000 characters) → medium
    - a `package.json` dependency spec change that doesn't change that dependency's resolved version in its own lockfile importer → medium
+   - a dependency resolved to a non-registry or aliased version (`link:`, `file:`, git, `npm:` alias) → medium
    - an action ref removed with no replacement at the same site (a deleted step), or several refs for one action changed together so they can't be paired → medium
 3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.
    - The final verdict is the **highest** of the model's verdict, the severity of each of its findings, and the flags.

@@ -381,6 +381,30 @@ async function main() {
     const reResolved = [...newRes].filter(([k, v]) => oldRes.has(k) && oldRes.get(k) !== v).map(([k]) => k);
     if (reResolved.length) facts.flags.push({ severity: 'medium', package: reResolved.slice(0, 10).join(', '), reason: 'lockfile resolution or integrity changed without a version change' });
     const { updated, added, removed } = diffLocks(parsePnpmLock(oldText), parsePnpmLock(newText));
+
+    // A package (importer) can move between versions that are both in the lockfile before and
+    // after, because another package still uses the old one or already used the new one, or
+    // the old one simply drops out. diffLocks can't see that, so every importer transition it
+    // missed is reviewed as its own update (or as a new package, for a newly added dependency).
+    const strip = v => v?.replace(/\(.*$/, '');
+    const plain = v => /^\d+\.\d+\.\d+(?:[-+][^\s()]*)?$/.test(v);
+    const oldImp = pnpmImporters(oldText), newImp = pnpmImporters(newText);
+    const have = new Set([...updated.map(u => `${u.name}|${u.from}|${u.to}`), ...added.map(a => `${a.name}||${a.version}`)]);
+    const odd = [];
+    for (const [imp, deps] of newImp) {
+      for (const [name, ver] of deps) {
+        const from = strip(oldImp.get(imp)?.get(name)), to = strip(ver);
+        if (from === to) continue;
+        if (!plain(to) || (from !== undefined && !plain(from))) { odd.push(`${name} (${imp})`); continue; }
+        const key = from === undefined ? `${name}||${to}` : `${name}|${from}|${to}`;
+        if (have.has(key)) continue;
+        have.add(key);
+        if (from === undefined) added.push({ name, version: to });
+        else updated.push({ name, from, to });
+      }
+    }
+    if (odd.length) facts.flags.push({ severity: 'medium', package: odd.slice(0, 10).join(', '), reason: 'resolved to a non-registry or aliased version (link:, file:, git, npm: alias), which is not reviewed' });
+
     updated.sort((a, b) => Number(direct.has(b.name)) - Number(direct.has(a.name)));
     sections.push(`## Lockfile ${f}\n- updated: ${updated.length}\n- newly added packages: ${added.length}\n- removed: ${removed.length}`);
 
