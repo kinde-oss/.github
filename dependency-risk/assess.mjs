@@ -83,7 +83,7 @@ async function askModel(context) {
   const call = j.content?.find(c => c.type === 'tool_use' && c.name === TOOL.name);
   if (!call) throw new Error(`model did not return a verdict (stop_reason: ${j.stop_reason})`);
   const v = call.input;
-  if (!(v?.verdict in RANK)) throw new Error(`invalid verdict: ${JSON.stringify(v?.verdict)}`);
+  if (!Object.hasOwn(RANK, v?.verdict)) throw new Error(`invalid verdict: ${JSON.stringify(v?.verdict)}`);
   return { verdict: v.verdict, summary: String(v.summary ?? ''), findings: Array.isArray(v.findings) ? v.findings : [] };
 }
 
@@ -112,7 +112,7 @@ async function main() {
   let verdict = model.verdict;
   for (const f of facts.flags) if (RANK[f.severity] > RANK[verdict]) verdict = f.severity;
   for (const f of model.findings) {
-    const sev = f?.severity in RANK ? f.severity : 'high';
+    const sev = Object.hasOwn(RANK, f?.severity) ? f.severity : 'high';
     if (RANK[sev] > RANK[verdict]) verdict = sev;
   }
   if (facts.truncated && verdict === 'low') verdict = 'medium';

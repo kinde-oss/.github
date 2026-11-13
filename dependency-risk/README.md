@@ -15,7 +15,7 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
      - install scripts
      - new dependencies
      - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile
-     - for newly added packages, the published file list, `package.json` and entry file, read straight out of the tarball (nothing is unpacked or run)
+     - for newly added packages, the published file list, `package.json` and every file that could contain code (up to 20,000 characters), read in memory from the tarball (nothing is unpacked or run)
    - For workflow files, it finds changed `uses:` refs and fetches the GitHub compare diff.
    - It also includes the Renovate PR description, which carries the release notes.
 2. **Deterministic flags** come from that metadata and set a minimum verdict:
@@ -28,7 +28,9 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
    - `package.json` changed outside its dependency fields (`packageManager`, `engines`, `overrides`, `scripts`, ...) → medium
    - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
    - lockfile resolution or integrity changed without a version change → medium
-   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched, or a new package ships JavaScript but no entry file was found) → medium
+   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, or a new package's code is binary or over 20,000 characters) → medium
+   - a `package.json` dependency spec change with no matching version change in the lockfile → medium
+   - an action ref removed with no replacement at the same site (a deleted step, or a pairing that can't be told apart) → medium
 3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.
    - The final verdict is the **highest** of the model's verdict, the severity of each of its findings, and the flags.
    - A truncated context can't be judged low.

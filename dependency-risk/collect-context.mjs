@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 
 const [baseSha, headSha, outDir = '.'] = process.argv.slice(2);
 
@@ -18,7 +19,7 @@ const LIMITS = {
   totalChars: 180_000,       // overall context budget
   perPackageDiff: 12_000,    // npm diff per package
   perActionDiff: 8_000,      // GitHub compare diff per action
-  perNewPackage: 8_000,      // file list + package.json + entry file per new package
+  perNewPackage: 20_000,     // code shown per new package (plus its file list and package.json)
   prBody: 20_000,
   maxPackagesDiffed: 40,
   maxNewPackagesInspected: 20,
@@ -130,45 +131,81 @@ function npmDiff(name, from, to) {
     return execFileSync('npm', ['diff', `--diff=${name}@${from}`, `--diff=${name}@${to}`, '--diff-unified=2', '--diff-name-only=false'],
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch (e) {
-    return e.stdout ? String(e.stdout) : `(npm diff failed: ${e.message.split('\n')[0]})`;
+    // A failed run can still leave partial output; keep it for the model but mark the failure.
+    return `(npm diff failed: ${e.message.split('\n')[0]})` + (e.stdout ? `\n${e.stdout}` : '');
   }
 }
 const diffFailed = d => d.startsWith('(npm diff failed');
 
-// Published code of a newly added package: file list, package.json and its entry file.
-// Downloads the tarball with scripts disabled and reads members with `tar -O`, so nothing
-// is unpacked to disk and symlinks inside the package are never followed.
-// Returns null when the tarball could not be read, otherwise { text, inspected } where
-// inspected is false if the package ships executable files but no entry file was found.
+// Minimal in-memory reader for a gzipped tar: returns regular files as { name, body }.
+// Nothing is written to disk, and symlinks, hard links and devices are ignored.
+export function readTarball(gz) {
+  const data = gunzipSync(gz);
+  const files = [];
+  let off = 0, paxPath = null;
+  while (off + 512 <= data.length) {
+    const h = data.subarray(off, off + 512);
+    if (h.every(b => b === 0)) break;
+    const field = (a, b) => h.subarray(a, b).toString('utf8').replace(/\0[\s\S]*$/, '');
+    const size = parseInt(field(124, 136).trim() || '0', 8);
+    const type = h[156] === 0 ? '0' : String.fromCharCode(h[156]);
+    const prefix = field(345, 500);
+    const name = paxPath ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
+    const body = data.subarray(off + 512, off + 512 + size);
+    off += 512 + Math.ceil(size / 512) * 512;
+    if (type === 'x') { paxPath = body.toString('utf8').match(/\d+ path=([^\n]*)\n/)?.[1] ?? null; continue; }
+    paxPath = null;
+    if (type === '0' || type === '7') files.push({ name, body });
+  }
+  return files;
+}
+
+// Files that can't run: docs, licences, type declarations, source maps, data, styles, images.
+const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)[^/]*$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|ya?ml)$/i;
+
+// Decides what the model sees from a new package: the file list, package.json, then every file
+// that could contain code (entry file first). `inspected` is false when any such file is binary
+// or the code doesn't fit the budget, i.e. when some code would not reach the model.
+export function inspectPackageFiles(files, budget = LIMITS.perNewPackage) {
+  const root = files[0]?.name.split('/')[0];
+  if (!root) return { text: '(empty package)', inspected: true };
+  const byName = new Map(files.map(f => [f.name.slice(root.length + 1), f.body]));
+  const pkgText = byName.get('package.json')?.toString('utf8') ?? '';
+  let pkg = {};
+  try { pkg = JSON.parse(pkgText); } catch { /* shown raw below */ }
+  const pick = e => typeof e === 'string' ? e
+    : Array.isArray(e) ? pick(e[0])
+    : e && typeof e === 'object' ? pick(e['.'] ?? e.node ?? e.require ?? e.import ?? e.default) : null;
+  const entry = [pick(pkg.exports), pkg.main, pkg.module, 'index.js']
+    .filter(p => typeof p === 'string')
+    .map(p => p.replace(/^\.?\//, ''))
+    .flatMap(p => [p, `${p}.js`, `${p}/index.js`])
+    .find(p => byName.has(p));
+  const code = [...byName.keys()].filter(f => !NON_CODE.test(f)).sort((a, b) => Number(b === entry) - Number(a === entry));
+
+  let text = `files:\n${truncate([...byName].map(([f, b]) => `${f} (${b.length} bytes)`).join('\n'), 2_000)}\n` +
+    `package.json:\n${truncate(pkgText, 2_000)}\n`;
+  let inspected = true;
+  for (const f of code) {
+    const body = byName.get(f);
+    if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; continue; }
+    const chunk = `\n--- ${f} ---\n${body.toString('utf8')}`;
+    if (chunk.length > budget) { inspected = false; text += `\n--- ${f} and later files: not shown, code budget reached ---\n`; break; }
+    text += chunk;
+    budget -= chunk.length;
+  }
+  return { text, inspected };
+}
+
+// Published code of a newly added package. Downloads the tarball with scripts disabled and reads
+// it in memory, so nothing is unpacked or run. Returns null when it could not be read.
 export function newPackageSource(name, version) {
   const dir = mkdtempSync(join(tmpdir(), 'dependency-risk-'));
   try {
     execFileSync('npm', ['pack', `${name}@${version}`, '--ignore-scripts', '--pack-destination', dir],
       { timeout: 60_000, stdio: ['ignore', 'ignore', 'ignore'] });
     const tgz = readdirSync(dir).find(f => f.endsWith('.tgz'));
-    if (!tgz) return null;
-    const tarball = join(dir, tgz);
-    const tar = (...args) => execFileSync('tar', ['-xzOf', tarball, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const listing = execFileSync('tar', ['-tzvf', tarball], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 60_000 });
-    const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\n').filter(Boolean);
-    const root = files[0]?.split('/')[0];
-    if (!root) return null;
-    const pkgText = files.includes(`${root}/package.json`) ? tar(`${root}/package.json`) : '';
-    let pkg = {};
-    try { pkg = JSON.parse(pkgText); } catch { /* shown raw below */ }
-    const pick = e => typeof e === 'string' ? e
-      : Array.isArray(e) ? pick(e[0])
-      : e && typeof e === 'object' ? pick(e['.'] ?? e.node ?? e.require ?? e.import ?? e.default) : null;
-    const entry = [pick(pkg.exports), pkg.main, pkg.module, 'index.js']
-      .filter(p => typeof p === 'string')
-      .map(p => p.replace(/^\.?\//, ''))
-      .flatMap(p => [p, `${p}.js`, `${p}/index.js`])
-      .map(p => `${root}/${p}`)
-      .find(p => files.includes(p));
-    const executable = files.some(f => /\.([cm]?js|node|wasm)$/.test(f));
-    const text = `files:\n${truncate(listing, 2_000)}\npackage.json:\n${truncate(pkgText, 2_000)}\n` +
-      (entry ? `${entry.slice(root.length + 1)}:\n${tar(entry)}` : '(no entry file found)');
-    return { text, inspected: Boolean(entry) || !executable };
+    return tgz ? inspectPackageFiles(readTarball(readFileSync(join(dir, tgz)))) : null;
   } catch {
     return null;
   } finally {
@@ -182,11 +219,19 @@ const reviewableUse = m => m && !m[2].startsWith('./') && !m[2].startsWith('dock
 
 // Pairs each added `uses:` with the next removed one for the same action in the same file,
 // so different sites updating the same action each get their own comparison.
+// Pairing happens within one change block (a run of -/+ lines between context lines), so a
+// removed ref is only ever paired with an added ref at the same site. Removed refs left over
+// at the end of a block (a deleted step, or an ambiguous pairing) are returned as `unpaired`
+// so the caller can flag them instead of silently dropping a comparison.
 export function parseActionChanges(patch) {
-  const changes = [], seen = new Set();
-  let pending = new Map(); // action -> removed refs not yet paired, within the current file
+  const changes = [], unpaired = [], seen = new Set();
+  let pending = new Map(); // action -> removed refs not yet paired in the current block
+  const flush = () => {
+    for (const [action, refs] of pending) for (const r of refs) unpaired.push({ action, ...r });
+    pending = new Map();
+  };
   for (const line of patch.split('\n')) {
-    if (line.startsWith('diff --git')) { pending = new Map(); continue; }
+    if (!/^[+-]/.test(line) || /^(\+\+\+|---) /.test(line)) { flush(); continue; }
     const m = line.match(USES_RE);
     if (!reviewableUse(m)) continue;
     const [, sign, action, ref, comment] = m;
@@ -202,7 +247,8 @@ export function parseActionChanges(patch) {
     seen.add(key);
     changes.push({ action, from, to: use });
   }
-  return changes;
+  flush();
+  return { changes, unpaired };
 }
 
 // Changed workflow lines that aren't a reviewable `uses: owner/repo@ref` (docker:// images,
@@ -318,10 +364,17 @@ async function main() {
       facts.newPackages.push(entry);
       const src = i < LIMITS.maxNewPackagesInspected ? newPackageSource(a.name, a.version) : null;
       if (!src?.inspected) notReviewed.push(`${a.name}@${a.version}`);
-      else if (src.text.length > LIMITS.perNewPackage) facts.diffsTruncated++;
       sections.push(`### NEW package ${a.name}@${a.version}\n- publisher: ${entry.publisher}\n- provenance: ${entry.provenance}\n- install scripts: ${JSON.stringify(entry.installScripts)}\n- description: ${entry.description}\n` +
-        (src === null ? '(published code not inspected)\n' : '```\n' + truncate(src.text, LIMITS.perNewPackage) + '\n```\n'));
+        (src === null ? '(published code not inspected)\n' : '```\n' + src.text + '\n```\n'));
     }
+  }
+
+  // A dependency spec change with no matching lockfile version change (e.g. only the importer
+  // specifier moved, an alias, or a spec the lockfile doesn't reflect) is code nobody reviewed.
+  if (lockChanged) {
+    const reviewed = new Set([...facts.packages, ...facts.newPackages].map(p => p.name));
+    const unmatched = [...direct].filter(n => !reviewed.has(n));
+    if (unmatched.length) facts.flags.push({ severity: 'medium', package: unmatched.slice(0, 10).join(', ') + (unmatched.length > 10 ? ` (+${unmatched.length - 10} more)` : ''), reason: 'dependency spec changed in package.json without a matching package version change in the lockfile' });
   }
 
   // GitHub Actions changes
@@ -332,7 +385,8 @@ async function main() {
       facts.flags.push({ severity: 'medium', package: 'workflow files', reason: `${other.length} changed workflow line(s) other than action uses: refs (e.g. docker:// images, run steps)` });
       sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join('\n'), LIMITS.perActionDiff) + '\n```');
     }
-    const changes = parseActionChanges(patch);
+    const { changes, unpaired } = parseActionChanges(patch);
+    if (unpaired.length) facts.flags.push({ severity: 'medium', package: [...new Set(unpaired.map(u => `${u.action}@${u.tag ?? u.ref}`))].slice(0, 10).join(', '), reason: 'action ref removed without a matching replacement at the same site (deleted step or ambiguous pairing)' });
     for (const c of changes) {
       facts.actions.push(c);
       if (!c.from) facts.flags.push({ severity: 'medium', package: c.action, reason: 'new GitHub Action introduced' });
