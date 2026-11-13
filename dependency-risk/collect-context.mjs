@@ -10,7 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 
 const [baseSha, headSha, outDir = '.'] = process.argv.slice(2);
@@ -27,7 +27,10 @@ const LIMITS = {
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-const gitShow = (sha, path) => { try { return git('show', `${sha}:${path}`); } catch { return ''; } };
+// Missing paths are expected (e.g. probing for a package's lockfile), so stderr is dropped.
+const gitShow = (sha, path) => {
+  try { return execFileSync('git', ['show', `${sha}:${path}`], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return ''; }
+};
 const truncate = (s, n) => (s.length > n ? s.slice(0, n) + `\n… [truncated ${s.length - n} chars]` : s);
 
 // ---------- pnpm lockfile parsing (v6–v9) ----------
@@ -62,6 +65,38 @@ export function pnpmResolutions(text) {
     if (key && r) { out.set(key, r[1].trim()); cont = !r[1].trim(); continue; }
     if (cont && key && /^ {6}\S/.test(line)) { out.set(key, out.get(key) + line.trim() + ';'); continue; }
     cont = false;
+  }
+  return out;
+}
+
+// Collect importer path -> Map(dependency name -> resolved version) from `importers:` (workspaces,
+// v6–v9) or, for a single-project v6 lockfile, the top-level dependency sections (importer ".").
+export function pnpmImporters(text) {
+  const out = new Map();
+  const unquote = s => s.replace(/^['"]|['"]$/g, '');
+  const deps = imp => { if (!out.has(imp)) out.set(imp, new Map()); return out.get(imp); };
+  let mode = null, importer = null, dep = null;
+  for (const line of text.split('\n')) {
+    if (/^\S/.test(line)) {
+      mode = line.startsWith('importers:') ? 'importers'
+        : /^(dependencies|devDependencies|optionalDependencies):/.test(line) ? 'top' : null;
+      importer = mode === 'top' ? '.' : null;
+      dep = null;
+      continue;
+    }
+    if (mode === 'importers') {
+      let m = line.match(/^ {2}(\S.*?):\s*$/);
+      if (m) { importer = unquote(m[1]); deps(importer); dep = null; continue; }
+      m = line.match(/^ {6}(\S.*?):\s*$/);
+      if (m) { dep = unquote(m[1]); continue; }
+      m = line.match(/^ {8}version:\s*(.+)$/);
+      if (m && importer && dep) deps(importer).set(dep, m[1].trim());
+    } else if (mode === 'top') {
+      let m = line.match(/^ {2}(\S.*?):\s*$/);
+      if (m) { dep = unquote(m[1]); continue; }
+      m = line.match(/^ {4}version:\s*(.+)$/);
+      if (m && dep) deps('.').set(dep, m[1].trim());
+    }
   }
   return out;
 }
@@ -160,12 +195,17 @@ export function readTarball(gz) {
   return files;
 }
 
-// Files that can't run: docs, licences, type declarations, source maps, data, styles, images.
-const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)[^/]*$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|ya?ml)$/i;
+// Files that can't run on their own: docs, licences, type declarations, source maps, data,
+// styles, images. A doc-style name with a code extension (README.js) is still code.
+const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|ya?ml)$/i;
+const CODE_EXT = /\.([cm]?[jt]sx?|node|wasm|sh)$/i;
+const isNonCode = f => NON_CODE.test(f) && !(CODE_EXT.test(f) && !/\.d\.[cm]?ts$/i.test(f));
 
 // Decides what the model sees from a new package: the file list, package.json, then every file
-// that could contain code (entry file first). `inspected` is false when any such file is binary
-// or the code doesn't fit the budget, i.e. when some code would not reach the model.
+// that could contain code. Entry points declared in package.json (main, module, browser, every
+// exports target, bin) always count as code and go first. A file that looks like docs or data
+// is added too when the code shown mentions its name (e.g. require('./README.md')).
+// `inspected` is false when any code file is binary or the code doesn't fit the budget.
 export function inspectPackageFiles(files, budget = LIMITS.perNewPackage) {
   const root = files[0]?.name.split('/')[0];
   if (!root) return { text: '(empty package)', inspected: true };
@@ -173,27 +213,31 @@ export function inspectPackageFiles(files, budget = LIMITS.perNewPackage) {
   const pkgText = byName.get('package.json')?.toString('utf8') ?? '';
   let pkg = {};
   try { pkg = JSON.parse(pkgText); } catch { /* shown raw below */ }
-  const pick = e => typeof e === 'string' ? e
-    : Array.isArray(e) ? pick(e[0])
-    : e && typeof e === 'object' ? pick(e['.'] ?? e.node ?? e.require ?? e.import ?? e.default) : null;
-  const entry = [pick(pkg.exports), pkg.main, pkg.module, 'index.js']
+  const leaves = e => typeof e === 'string' ? [e]
+    : Array.isArray(e) ? e.flatMap(leaves)
+    : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
+  const entries = new Set([...leaves(pkg.exports), pkg.main, pkg.module, typeof pkg.browser === 'string' ? pkg.browser : null, ...leaves(pkg.bin), 'index.js']
     .filter(p => typeof p === 'string')
     .map(p => p.replace(/^\.?\//, ''))
     .flatMap(p => [p, `${p}.js`, `${p}/index.js`])
-    .find(p => byName.has(p));
-  const code = [...byName.keys()].filter(f => !NON_CODE.test(f)).sort((a, b) => Number(b === entry) - Number(a === entry));
+    .filter(p => byName.has(p)));
+  const names = [...byName.keys()].filter(f => f !== 'package.json');
+  const code = [...entries, ...names.filter(f => !entries.has(f) && !isNonCode(f))];
+  const skipped = names.filter(f => !entries.has(f) && isNonCode(f));
 
   let text = `files:\n${truncate([...byName].map(([f, b]) => `${f} (${b.length} bytes)`).join('\n'), 2_000)}\n` +
     `package.json:\n${truncate(pkgText, 2_000)}\n`;
-  let inspected = true;
-  for (const f of code) {
+  let inspected = true, shown = '';
+  const show = f => {
     const body = byName.get(f);
-    if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; continue; }
+    if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; return true; }
     const chunk = `\n--- ${f} ---\n${body.toString('utf8')}`;
-    if (chunk.length > budget) { inspected = false; text += `\n--- ${f} and later files: not shown, code budget reached ---\n`; break; }
-    text += chunk;
-    budget -= chunk.length;
-  }
+    if (chunk.length > budget) { inspected = false; text += `\n--- ${f} and later files: not shown, code budget reached ---\n`; return false; }
+    text += chunk; shown += chunk; budget -= chunk.length;
+    return true;
+  };
+  for (const f of code) if (!show(f)) return { text, inspected };
+  for (const f of skipped) if (shown.includes(f.split('/').pop()) && !show(f)) break;
   return { text, inspected };
 }
 
@@ -223,32 +267,46 @@ const reviewableUse = m => m && !m[2].startsWith('./') && !m[2].startsWith('dock
 // removed ref is only ever paired with an added ref at the same site. Removed refs left over
 // at the end of a block (a deleted step, or an ambiguous pairing) are returned as `unpaired`
 // so the caller can flag them instead of silently dropping a comparison.
+// A block with several refs for the same action can't be paired reliably, unless it's the same
+// bump at several sites (every old ref equal, every new ref equal); those refs are returned as
+// `ambiguous`, and every old→new combination goes to the model.
 export function parseActionChanges(patch) {
-  const changes = [], unpaired = [], seen = new Set();
-  let pending = new Map(); // action -> removed refs not yet paired in the current block
+  const changes = [], unpaired = [], ambiguous = [], seen = new Set();
+  const record = (action, from, to) => {
+    const key = `${action}|${from?.ref ?? ''}|${to.ref}`;
+    if ((from && from.ref === to.ref) || seen.has(key)) return;
+    seen.add(key);
+    changes.push({ action, from, to });
+  };
+  let block = new Map(); // action -> { rem: [], add: [] } for the current block
   const flush = () => {
-    for (const [action, refs] of pending) for (const r of refs) unpaired.push({ action, ...r });
-    pending = new Map();
+    for (const [action, { rem, add }] of block) {
+      const same = list => list.every(u => u.ref === list[0].ref);
+      if (rem.length <= 1 && add.length <= 1) {
+        if (add.length) record(action, rem[0] ?? null, add[0]);
+        else unpaired.push(...rem.map(r => ({ action, ...r })));
+      } else if (rem.length === add.length && same(rem) && same(add)) {
+        record(action, rem[0], add[0]);
+      } else {
+        ambiguous.push(...rem.map(r => ({ action, ...r })), ...add.map(a => ({ action, ...a })));
+        for (const a of add) {
+          if (!rem.length) record(action, null, a);
+          for (const r of rem) record(action, r, a);
+        }
+      }
+    }
+    block = new Map();
   };
   for (const line of patch.split('\n')) {
     if (!/^[+-]/.test(line) || /^(\+\+\+|---) /.test(line)) { flush(); continue; }
     const m = line.match(USES_RE);
     if (!reviewableUse(m)) continue;
     const [, sign, action, ref, comment] = m;
-    const use = { ref, tag: comment ?? null };
-    if (sign === '-') {
-      if (!pending.has(action)) pending.set(action, []);
-      pending.get(action).push(use);
-      continue;
-    }
-    const from = pending.get(action)?.shift() ?? null;
-    const key = `${action}|${from?.ref ?? ''}|${ref}`;
-    if ((from && from.ref === ref) || seen.has(key)) continue;
-    seen.add(key);
-    changes.push({ action, from, to: use });
+    if (!block.has(action)) block.set(action, { rem: [], add: [] });
+    block.get(action)[sign === '-' ? 'rem' : 'add'].push({ ref, tag: comment ?? null });
   }
   flush();
-  return { changes, unpaired };
+  return { changes, unpaired, ambiguous };
 }
 
 // Changed workflow lines that aren't a reviewable `uses: owner/repo@ref` (docker:// images,
@@ -304,11 +362,14 @@ async function main() {
   const DEP_KEYS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
   const withoutDeps = p => JSON.stringify(Object.fromEntries(Object.entries(p).filter(([k]) => !DEP_KEYS.includes(k))));
   const direct = new Set();
+  const specChanges = []; // { file, name } for every dependency whose spec changed
   for (const f of changed.filter(f => f.endsWith('package.json'))) {
     const o = JSON.parse(gitShow(baseSha, f) || '{}');
     const n = JSON.parse(gitShow(headSha, f) || '{}');
     for (const key of DEP_KEYS) {
-      for (const [name, spec] of Object.entries(n[key] ?? {})) if (o[key]?.[name] !== spec) direct.add(name);
+      for (const [name, spec] of Object.entries(n[key] ?? {})) {
+        if (o[key]?.[name] !== spec) { direct.add(name); specChanges.push({ file: f, name }); }
+      }
     }
     if (withoutDeps(o) !== withoutDeps(n)) facts.flags.push({ severity: 'medium', package: f, reason: 'package.json changed outside dependency fields (e.g. packageManager, engines, overrides, scripts)' });
   }
@@ -369,13 +430,31 @@ async function main() {
     }
   }
 
-  // A dependency spec change with no matching lockfile version change (e.g. only the importer
-  // specifier moved, an alias, or a spec the lockfile doesn't reflect) is code nobody reviewed.
-  if (lockChanged) {
-    const reviewed = new Set([...facts.packages, ...facts.newPackages].map(p => p.name));
-    const unmatched = [...direct].filter(n => !reviewed.has(n));
-    if (unmatched.length) facts.flags.push({ severity: 'medium', package: unmatched.slice(0, 10).join(', ') + (unmatched.length > 10 ? ` (+${unmatched.length - 10} more)` : ''), reason: 'dependency spec changed in package.json without a matching package version change in the lockfile' });
-  }
+  // Each dependency spec change must move the resolved version of that dependency in that
+  // package's own lockfile importer. If it doesn't (only the specifier moved, an alias, a peer
+  // dependency, a spec the lockfile doesn't reflect), the change is flagged. Matching per
+  // importer stops an update elsewhere in the repo from masking it.
+  const owningLock = f => {
+    for (let d = posix.dirname(f); ; d = posix.dirname(d)) {
+      const lock = d === '.' ? 'pnpm-lock.yaml' : `${d}/pnpm-lock.yaml`;
+      if (gitShow(headSha, lock) || gitShow(baseSha, lock)) return { lock, importer: posix.relative(d === '.' ? '' : d, posix.dirname(f)) || '.' };
+      if (d === '.' || d === '/') return null;
+    }
+  };
+  const importerCache = new Map();
+  const importers = (sha, lock) => {
+    const key = `${sha}:${lock}`;
+    if (!importerCache.has(key)) importerCache.set(key, pnpmImporters(gitShow(sha, lock)));
+    return importerCache.get(key);
+  };
+  const unmatched = specChanges.filter(({ file, name }) => {
+    const own = owningLock(file);
+    if (!own) return true;
+    const before = importers(baseSha, own.lock).get(own.importer)?.get(name);
+    const after = importers(headSha, own.lock).get(own.importer)?.get(name);
+    return before === after;
+  }).map(({ file, name }) => `${name} (${file})`);
+  if (unmatched.length) facts.flags.push({ severity: 'medium', package: unmatched.slice(0, 10).join(', ') + (unmatched.length > 10 ? ` (+${unmatched.length - 10} more)` : ''), reason: 'dependency spec changed in package.json without its resolved version changing in that package\'s lockfile importer' });
 
   // GitHub Actions changes
   if (wf.length) {
@@ -385,7 +464,8 @@ async function main() {
       facts.flags.push({ severity: 'medium', package: 'workflow files', reason: `${other.length} changed workflow line(s) other than action uses: refs (e.g. docker:// images, run steps)` });
       sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join('\n'), LIMITS.perActionDiff) + '\n```');
     }
-    const { changes, unpaired } = parseActionChanges(patch);
+    const { changes, unpaired, ambiguous } = parseActionChanges(patch);
+    if (ambiguous.length) facts.flags.push({ severity: 'medium', package: [...new Set(ambiguous.map(u => u.action))].slice(0, 10).join(', '), reason: 'several refs for the same action changed in one block, so old and new refs could not be paired reliably' });
     if (unpaired.length) facts.flags.push({ severity: 'medium', package: [...new Set(unpaired.map(u => `${u.action}@${u.tag ?? u.ref}`))].slice(0, 10).join(', '), reason: 'action ref removed without a matching replacement at the same site (deleted step or ambiguous pairing)' });
     for (const c of changes) {
       facts.actions.push(c);
