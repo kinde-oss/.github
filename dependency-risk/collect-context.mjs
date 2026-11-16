@@ -218,14 +218,27 @@ const diffFailed = d => d.startsWith('(npm diff failed');
 export function readTarball(gz) {
   const data = gunzipSync(gz);
   const files = [], unsupported = [];
-  let off = 0, pax = {};
+  let off = 0, pax = {}, zeroBlock = false;
   while (off + 512 <= data.length) {
     const h = data.subarray(off, off + 512);
-    if (h.every(b => b === 0)) break;
+    // The archive ends at two zero blocks in a row. npm's extractor keeps reading after a
+    // single one, so an entry hidden behind it would be installed; treat that as unreadable.
+    if (h.every(b => b === 0)) {
+      if (zeroBlock) break;
+      zeroBlock = true;
+      off += 512;
+      continue;
+    }
+    if (zeroBlock) { unsupported.push(`entry after a single end-of-archive block at byte ${off}`); break; }
     const field = (a, b) => h.subarray(a, b).toString('utf8').replace(/\0[\s\S]*$/, '');
     const type = h[156] === 0 ? '0' : String.fromCharCode(h[156]);
     const prefix = field(345, 500);
     const name = pax.path ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
+    // npm skips a header whose checksum doesn't match and reads the next block as a header,
+    // which this reader can't follow; stop and report it rather than read it differently.
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i];
+    if (sum !== parseInt(field(148, 156).trim() || 'NaN', 8)) { unsupported.push(`${name || `header at byte ${off}`} (bad checksum)`); break; }
     if (h[124] & 0x80) { unsupported.push(`${name} (base-256 size)`); break; }
     const size = pax.size !== undefined ? Number(pax.size) : parseInt(field(124, 136).trim() || '0', 8);
     if (!Number.isSafeInteger(size) || size < 0 || off + 512 + size > data.length) { unsupported.push(`${name} (bad or truncated size)`); break; }
@@ -278,16 +291,27 @@ export function inspectPackageFiles(files, { budget = LIMITS.perNewPackage, unsu
     : Array.isArray(e) ? e.flatMap(leaves)
     : e && typeof e === 'object' ? Object.entries(e).filter(([k]) => k !== 'types' && k !== 'typings').flatMap(([, v]) => leaves(v)) : [];
   const resolve = p => [p, `${p}.js`, `${p}.json`, `${p}.node`, `${p}/index.js`, `${p}/index.json`].find(c => byName.has(c));
-  const declared = [...leaves(pkg.exports), pkg.main, pkg.module, typeof pkg.browser === 'string' ? pkg.browser : null, ...leaves(pkg.bin)]
+  // A nested package.json makes its folder requirable: require('./lib') loads lib/package.json's
+  // main, whatever its extension (Node runs unknown extensions as JavaScript). So every manifest's
+  // targets are entry points, resolved from that manifest's folder.
+  const nested = [...byName.keys()].filter(f => f.endsWith('/package.json'));
+  const manifests = [['.', pkg], ...nested.map(f => {
+    let json = {};
+    try { json = JSON.parse(byName.get(f).toString('utf8')); } catch { /* shown raw as code */ }
+    return [posix.dirname(f), json];
+  })];
+  const declared = manifests.flatMap(([dir, p]) => [...leaves(p?.exports), p?.main, p?.module, typeof p?.browser === 'string' ? p.browser : null, ...leaves(p?.bin)]
     // Skip wildcard and folder ("./dir/") subpath patterns, and an empty main (types-only packages).
-    .filter(p => typeof p === 'string' && p.trim() !== '' && !p.includes('*') && !p.endsWith('/'))
-    .map(p => posix.normalize(p.replace(/^\.?\//, '') || '.'))
-    .map(p => (p === '.' ? 'index' : p));
-  const missing = declared.filter(p => !resolve(p));
+    .filter(t => typeof t === 'string' && t.trim() !== '' && !t.includes('*') && !t.endsWith('/'))
+    .map(t => posix.normalize(posix.join(dir, t.replace(/^\.?\//, '') || '.')))
+    .map(t => (t === '.' ? 'index' : t))
+    .filter(t => t !== '..' && !t.startsWith('../')));
+  const missing = [...new Set(declared.filter(p => !resolve(p)))];
   const entries = new Set([...declared, 'index.js'].map(resolve).filter(Boolean));
   const names = [...byName.keys()].filter(f => f !== 'package.json');
-  const code = [...entries, ...names.filter(f => !entries.has(f) && !isNonCode(f))];
-  const skipped = names.filter(f => !entries.has(f) && isNonCode(f));
+  // Nested manifests are shown like code so the model sees what they point at.
+  const code = [...entries, ...names.filter(f => !entries.has(f) && (!isNonCode(f) || nested.includes(f)))];
+  const skipped = names.filter(f => !entries.has(f) && isNonCode(f) && !nested.includes(f));
 
   let text = `files:\n${truncate([...byName].map(([f, b]) => `${f} (${b.length} bytes)`).join('\n'), 2_000)}\n` +
     `package.json:\n${truncate(pkgText, 2_000)}\n`;

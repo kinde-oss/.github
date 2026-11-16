@@ -46,6 +46,41 @@ test('a GNU long-name entry makes the package not inspected (the payload would i
   assert.equal(r.inspected, false);
 });
 
+test('a header with a bad checksum stops the reader instead of being read differently from npm', () => {
+  const bad = tarEntry({ name: 'package/decoy.txt', body: 'x'.repeat(600) });
+  bad[0] ^= 0x01; // corrupt the name so the stored checksum no longer matches
+  const { files, unsupported } = readTarball(tgz(pkg({}), bad, tarEntry({ name: 'package/index.js', body: 'HIDDEN()' })));
+  assert.match(unsupported.join(), /bad checksum/);
+  assert.deepEqual(files.map(f => f.name), ['package/package.json']);
+  const r = inspect(pkg({}), bad);
+  assert.equal(r.inspected, false);
+});
+
+test('an entry after a single zero block is reported; two zero blocks end the archive', () => {
+  const zero = Buffer.alloc(512);
+  let r = readTarball(tgz(pkg({}), zero, tarEntry({ name: 'package/index.js', body: 'HIDDEN()' })));
+  assert.match(r.unsupported.join(), /single end-of-archive block/);
+  r = readTarball(gzipSync(Buffer.concat([pkg({}), zero, zero, Buffer.from('trailing junk after the end')])));
+  assert.deepEqual(r.unsupported, []);
+  assert.deepEqual(r.files.map(f => f.name), ['package/package.json']);
+});
+
+test('a nested package.json makes its targets entry points, whatever their extension', () => {
+  let r = inspect(pkg({ main: 'index.js' }), tarEntry({ name: 'package/index.js', body: "require('./lib')" }),
+    tarEntry({ name: 'package/lib/package.json', body: '{"main": "loader.txt"}' }),
+    tarEntry({ name: 'package/lib/loader.txt', body: 'EVIL_TXT()' }));
+  assert.ok(r.text.includes('EVIL_TXT()'), 'the .txt file Node would run is shown');
+  assert.ok(r.text.includes('--- lib/package.json ---'), 'the nested manifest is shown');
+  assert.equal(r.inspected, true);
+
+  r = inspect(pkg({}), tarEntry({ name: 'package/lib/package.json', body: '{"main": "gone.js"}' }));
+  assert.equal(r.inspected, false, 'a nested main that does not exist means not inspected');
+  assert.match(r.text, /declared entry points not found in the tarball: lib\/gone\.js/);
+
+  r = inspect(pkg({}), tarEntry({ name: 'package/lib/package.json', body: '{"main": "../../outside.js"}' }));
+  assert.equal(r.inspected, true, 'targets outside the package are ignored');
+});
+
 test('a truncated archive is not trusted', () => {
   const whole = tarEntry({ name: 'package/index.js', body: 'x'.repeat(2000) });
   const { unsupported } = readTarball(gzipSync(whole.subarray(0, 1024)));
