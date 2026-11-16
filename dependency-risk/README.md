@@ -49,10 +49,13 @@ It only understands pnpm lockfiles (format 6.x or 9.x), `package.json` and GitHu
    - a `package.json` dependency spec change that doesn't move that dependency to a new resolved version in its own lockfile importer (including when the entry disappears) → medium
    - a dependency resolved to a non-registry or aliased version (`link:`, `file:`, git, `npm:` alias) → medium
    - an action ref removed with no replacement at the same site (a deleted step), or several refs for one action changed together so they can't be paired → medium
-3. **`assess.mjs`** sends the context to Claude as untrusted data and gets a structured verdict back.
-   - The final verdict is the **highest** of the model's verdict, the severity of each of its findings, and the flags.
-   - A truncated context can't be judged low.
-   - Any error (API down, bad output, crash) counts as **high**.
+3. **`assess.mjs`** sends the collected data to Claude as untrusted data and gets a structured verdict back.
+   - Each updated package, new package and action is a unit that is reviewed whole. Units are packed into calls of up to 150,000 characters (about 37,000 tokens), so a large grouped PR is reviewed in several calls, four at a time, each with the release notes. A big package gets a call to itself; small ones share.
+   - Rate limits and server errors are retried twice before a call counts as failed.
+   - The final verdict is the **highest** of every call's verdict, the severity of each finding, and the flags.
+   - Units past the overall budget of 2,000,000 characters (about 500,000 tokens, roughly $2 of Opus 5.5 input at most) aren't sent, and are flagged medium instead.
+   - A unit that had to be cut can't be judged low.
+   - Any error (API down, bad output, crash, a failed call) counts as **high**.
 4. The workflow posts one sticky PR comment, labels anything that isn't low with `needs-human`, and fails the check.
 
 ## Overriding

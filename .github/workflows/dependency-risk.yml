@@ -31,7 +31,8 @@ jobs:
     # PRs from anyone else skip this job, which counts as passing.
     if: github.event.pull_request.user.login == inputs.bot-login
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Large PRs are reviewed in several model calls (four at a time, with retries).
+    timeout-minutes: 45
     concurrency:
       group: dependency-risk-${{ github.event.pull_request.number }}
       cancel-in-progress: true

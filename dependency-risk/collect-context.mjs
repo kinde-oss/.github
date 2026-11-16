@@ -5,7 +5,8 @@
 //
 // Usage: node collect-context.mjs <baseSha> <headSha> <outDir>
 // Env:   GITHUB_TOKEN (optional, for GitHub Action compare diffs), PR_BODY_FILE (optional)
-// Writes <outDir>/context.md (for the model) and <outDir>/facts.json (deterministic flags).
+// Writes <outDir>/units.json (what the model reviews: a shared preamble plus one unit per
+// updated package, new package or action) and <outDir>/facts.json (deterministic flags).
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, readdirSync, rmSync, realpathSync } from 'node:fs';
@@ -19,7 +20,9 @@ const [baseSha, headSha, outDir = '.'] = process.argv.slice(2);
 // Budgets apply to code that runs; docs, tests, data and assets are listed instead of shown.
 // Code that runs but doesn't fit means "not reviewed", so the PR comes back medium.
 const LIMITS = {
-  totalChars: 600_000,       // overall context budget (about 150k tokens)
+  // Each package or action is one review unit, sent whole to one model call (small units share a call).
+  maxUnitChars: 120_000,     // a unit longer than this is cut and the run can't be low (shouldn't happen)
+  totalChars: 2_000_000,     // across all calls (about 500k tokens); later units are flagged, not sent
   perPackageCode: 100_000,   // changed code that runs, per updated npm package
   perActionCode: 100_000,    // changed code that runs, per GitHub Action (action.yml + runtime bundle)
   workflowLines: 8_000,      // workflow lines outside uses: refs, shown for context
@@ -636,7 +639,8 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   const changed = git('diff', '--name-only', `${baseSha}...${headSha}`).split('\n').filter(Boolean);
   const facts = { packages: [], newPackages: [], actions: [], flags: [], changedFiles: changed };
-  const sections = [];
+  const shared = []; // goes to every review call: release notes, lockfile summaries
+  const units = []; // one per updated package, new package or action, each reviewed whole
   const notReviewed = []; // updates whose published code never reached the model
 
   // Set by the workflow: commits on the PR not authored by the bot (or, if required, not
@@ -721,7 +725,7 @@ async function main() {
     }
 
     updated.sort((a, b) => Number(direct.has(b.name)) - Number(direct.has(a.name)));
-    sections.push(`## Lockfile ${f}\n- updated: ${updated.length}\n- newly added packages: ${added.length}\n- removed: ${removed.length}`);
+    shared.push(`## Lockfile ${f}\n- updated: ${updated.length}\n- newly added packages: ${added.length}\n- removed: ${removed.length}`);
 
     for (const [i, u] of updated.entries()) {
       const [mo, mn] = await Promise.all([manifest(u.name, u.from), manifest(u.name, u.to)]);
@@ -761,7 +765,7 @@ async function main() {
         notReviewed.push(`${u.name}@${u.to} (past the ${LIMITS.maxPackagesDiffed}-package diff limit)`);
         body += '(diff skipped: package limit reached)\n';
       }
-      sections.push(body);
+      units.push({ title: `${u.name} ${u.from} → ${u.to}`, text: body });
     }
 
     for (const [i, a] of added.entries()) {
@@ -774,8 +778,8 @@ async function main() {
       facts.newPackages.push(entry);
       const src = i < LIMITS.maxNewPackagesInspected ? newPackageSource(a.name, a.version) : null;
       if (!src?.inspected) notReviewed.push(`${a.name}@${a.version}`);
-      sections.push(`### NEW package ${a.name}@${a.version}\n- publisher: ${entry.publisher}\n- provenance: ${entry.provenance}\n- install scripts: ${JSON.stringify(entry.installScripts)}\n- description: ${entry.description}\n` +
-        (src === null ? '(published code not inspected)\n' : '```\n' + src.text + '\n```\n'));
+      units.push({ title: `new package ${a.name}@${a.version}`, text: `### NEW package ${a.name}@${a.version}\n- publisher: ${entry.publisher}\n- provenance: ${entry.provenance}\n- install scripts: ${JSON.stringify(entry.installScripts)}\n- description: ${entry.description}\n` +
+        (src === null ? '(published code not inspected)\n' : '```\n' + src.text + '\n```\n') });
     }
   }
 
@@ -814,7 +818,7 @@ async function main() {
     const other = unreviewedWorkflowLines(patch);
     if (other.length) {
       facts.flags.push({ severity: 'medium', package: 'workflow files', reason: `${other.length} changed workflow line(s) other than action uses: refs (e.g. docker:// images, run steps)` });
-      sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join("\n"), LIMITS.workflowLines) + '\n```');
+      units.push({ title: 'workflow lines outside action refs', text: '### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join("\n"), LIMITS.workflowLines) + '\n```' });
     }
     const { changes, unpaired, ambiguous } = parseActionChanges(patch);
     if (ambiguous.length) facts.flags.push({ severity: 'medium', package: [...new Set(ambiguous.map(u => u.action))].slice(0, 10).join(', '), reason: 'several refs for the same action changed in one block, so old and new refs could not be paired reliably' });
@@ -824,28 +828,48 @@ async function main() {
       if (!c.from) facts.flags.push({ severity: 'medium', package: c.action, reason: 'new GitHub Action introduced' });
       const r = await reviewAction(c);
       if (r && !r.complete) notReviewed.push(`${c.action}@${c.to.tag ?? c.to.ref} (code that runs not fully reviewed)`);
-      sections.push(`### Action ${c.action} ${c.from?.tag ?? c.from?.ref ?? '(new)'} → ${c.to.tag ?? c.to.ref}\n` + '```diff\n' + (r?.text ?? '(no compare: new action)') + '\n```');
+      const title = `action ${c.action} ${c.from?.tag ?? c.from?.ref ?? '(new)'} → ${c.to.tag ?? c.to.ref}`;
+      units.push({ title, text: `### Action ${c.action} ${c.from?.tag ?? c.from?.ref ?? '(new)'} → ${c.to.tag ?? c.to.ref}\n` + '```diff\n' + (r?.text ?? '(no compare: new action)') + '\n```' });
     }
   }
 
+  // Release notes from the Renovate PR body go to every review call, with the lockfile summaries.
+  if (process.env.PR_BODY_FILE && existsSync(process.env.PR_BODY_FILE)) {
+    shared.unshift('## Renovate PR description (release notes)\n' + truncate(readFileSync(process.env.PR_BODY_FILE, 'utf8'), LIMITS.prBody));
+  }
+
+  // Each unit is reviewed whole, in one call. Units past the overall budget aren't sent at all.
+  const { units: sent, overflow, truncated } = capUnits(units, LIMITS);
+  facts.truncated = truncated;
+  notReviewed.push(...overflow.map(u => `${u.title} (past the overall review budget)`));
+
   // A skipped or failed diff means the model never saw that code, so it can't be judged low.
-  // (A diff cut at its per-item limit still reaches the model, which is told to weigh that.)
   if (notReviewed.length) {
     const list = notReviewed.slice(0, 10).join(', ') + (notReviewed.length > 10 ? ` (+${notReviewed.length - 10} more)` : '');
     facts.flags.push({ severity: 'medium', package: list, reason: `published code that runs was not fully reviewed for ${notReviewed.length} update(s)` });
   }
 
-  // Release notes from the Renovate PR body
-  if (process.env.PR_BODY_FILE && existsSync(process.env.PR_BODY_FILE)) {
-    sections.unshift('## Renovate PR description (release notes)\n' + truncate(readFileSync(process.env.PR_BODY_FILE, 'utf8'), LIMITS.prBody));
-  }
-
-  let context = sections.join('\n\n');
-  facts.truncated = context.length > LIMITS.totalChars;
-  context = truncate(context, LIMITS.totalChars);
-  writeFileSync(`${outDir}/context.md`, context);
+  const review = { shared: shared.join('\n\n'), units: sent };
+  writeFileSync(`${outDir}/units.json`, JSON.stringify(review, null, 2));
   writeFileSync(`${outDir}/facts.json`, JSON.stringify(facts, null, 2));
-  console.log(`packages updated: ${facts.packages.length}, new: ${facts.newPackages.length}, actions: ${facts.actions.length}, flags: ${facts.flags.length}, context chars: ${context.length}`);
+  const chars = review.shared.length + sent.reduce((n, u) => n + u.text.length, 0);
+  console.log(`packages updated: ${facts.packages.length}, new: ${facts.newPackages.length}, actions: ${facts.actions.length}, flags: ${facts.flags.length}, review units: ${sent.length}, chars: ${chars}`);
+}
+
+// Applies the review budgets to the units: a unit longer than maxUnitChars is cut (and the run
+// marked truncated, so it can't be low), and once totalChars is spent the remaining units are
+// returned as overflow, to be flagged instead of sent.
+export function capUnits(units, { maxUnitChars, totalChars }) {
+  let spent = 0, truncated = false;
+  const kept = [], overflow = [];
+  for (const u of units) {
+    let text = u.text;
+    if (text.length > maxUnitChars) { text = truncate(text, maxUnitChars); truncated = true; }
+    if (spent + text.length > totalChars) { overflow.push(u); continue; }
+    spent += text.length;
+    kept.push({ ...u, text });
+  }
+  return { units: kept, overflow, truncated };
 }
 
 const isMain = () => { try { return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } };

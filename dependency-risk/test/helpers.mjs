@@ -77,7 +77,9 @@ export function collect(repo, base, head, env = {}) {
       cwd: repo.dir, stdio: ['ignore', 'ignore', 'pipe'],
       env: { ...process.env, GITHUB_TOKEN: '', PR_BODY_FILE: '', FOREIGN_COMMITS: '', ...env },
     });
-    return JSON.parse(readFileSync(join(out, 'facts.json'), 'utf8'));
+    const facts = JSON.parse(readFileSync(join(out, 'facts.json'), 'utf8'));
+    facts.review = JSON.parse(readFileSync(join(out, 'units.json'), 'utf8'));
+    return facts;
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
