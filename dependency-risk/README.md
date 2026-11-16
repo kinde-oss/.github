@@ -4,7 +4,7 @@ An AI and metadata review of Renovate PRs. It runs as a required check, so Renov
 
 The check doesn't look at the update type. Keeping major and `0.x` updates out of auto-merge is the job of the [`kinde-oss/renovate-config`](https://github.com/kinde-oss/renovate-config) preset, so a repo that doesn't extend it (or set an equivalent rule) can auto-merge a major update that comes back low.
 
-It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` refs. Any other change in a Renovate PR (npm or yarn lockfiles, Dockerfiles, `go.mod`, `pnpm-workspace.yaml` catalogs, `.nvmrc`, ...) comes back **medium** and needs a human.
+It only understands pnpm lockfiles (format 6.x or 9.x), `package.json` and GitHub Actions `uses:` refs. Any other change in a Renovate PR (npm or yarn lockfiles, Dockerfiles, `go.mod`, `pnpm-workspace.yaml` catalogs, `.nvmrc`, ...) comes back **medium** and needs a human.
 
 ## How it decides
 
@@ -15,20 +15,25 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
      - install scripts
      - new dependencies
      - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile
-     - for newly added packages, the published file list, `package.json`, its declared entry points and every other file that could contain code (up to 20,000 characters), read in memory from the tarball (nothing is unpacked or run)
+     - for newly added packages, the published file list, `package.json`, its declared entry points and every other file that could contain code (up to 20,000 characters), read in memory from the tarball with the same path rules npm uses when extracting (nothing is unpacked or run)
+   - It checks that each reviewed version is what the lockfile actually installs: the lockfile's integrity hash must match the npm registry's, and nothing may point at another tarball.
    - For workflow files, it finds changed `uses:` refs and fetches the GitHub compare diff.
    - It also includes the Renovate PR description, which carries the release notes.
 2. **Deterministic flags** come from that metadata and set a minimum verdict:
    - install script added or changed → high
    - provenance lost → high
    - new package with install scripts → high
+   - lockfile installs something other than the registry artifact that was reviewed (integrity mismatch, or a tarball from anywhere but the npm registry) → high
    - publisher changed → medium
+   - a commit on the PR not authored by the bot, or not verified by GitHub → medium
+   - unsupported pnpm lockfile format, lockfile deleted, or a lockfile change none of the checks recognise → medium
+   - a new lockfile entry that isn't a plain npm registry package (URL, git, file or tarball source) → medium
    - new GitHub Action → medium
    - changed files the check can't analyse → medium
    - `package.json` changed outside its dependency fields (`packageManager`, `engines`, `overrides`, `scripts`, ...) → medium
    - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
    - lockfile resolution or integrity changed without a version change → medium
-   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, or a new package's code is binary or over 20,000 characters) → medium
+   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, a new package's code is binary or over 20,000 characters, its tarball has entries the reader can't interpret like npm would, or a declared entry point is missing) → medium
    - a `package.json` dependency spec change that doesn't move that dependency to a new resolved version in its own lockfile importer (including when the entry disappears) → medium
    - a dependency resolved to a non-registry or aliased version (`link:`, `file:`, git, `npm:` alias) → medium
    - an action ref removed with no replacement at the same site (a deleted step), or several refs for one action changed together so they can't be paired → medium
@@ -41,6 +46,8 @@ It only understands pnpm lockfiles, `package.json` and GitHub Actions `uses:` re
 ## Overriding
 
 Review the PR, add the `risk-accepted` label, then use **Re-run jobs** on the failed check. The workflow reads labels live, so the re-run passes and Renovate merges.
+
+The label approves the commits you reviewed, not later ones. When new commits arrive (Renovate updates the branch, or anyone pushes to it), the workflow removes the label before reviewing again, so you'll need to review and accept again.
 
 ## Adding to a repo
 
@@ -56,3 +63,12 @@ Review the PR, add the `risk-accepted` label, then use **Re-run jobs** on the fa
 | `bot-login` | `renovate[bot]` | Change this if you self-host Renovate under another account. |
 | `model` | `claude-opus-5-5` | Any Claude model ID. A cheaper model also works, since runs are weekly and grouped. |
 | `tools-ref` | `main` | Ref of this repo to load the scripts from. Pin it to a tag or SHA for stability. |
+| `require-verified-commits` | `true` | Flag the PR unless every commit is authored by `bot-login` and shows as verified on GitHub. The hosted Renovate app's commits should be verified; set this to `false` if yours aren't (for example, self-hosted Renovate without commit signing). |
+
+## Tests
+
+```bash
+node --test 'dependency-risk/test/*.test.mjs'
+```
+
+The suite needs Node 22 and git, and no network. It runs on every PR that touches these files (`.github/workflows/dependency-risk-tests.yml`). Every repo using the reusable workflow loads these scripts from `main`, so add a test with any change to the parsing or verdict logic.

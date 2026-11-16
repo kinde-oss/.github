@@ -6,7 +6,8 @@
 // Usage: node assess.mjs <dir>   (reads <dir>/context.md + <dir>/facts.json, writes <dir>/risk.json + <dir>/comment.md)
 // Env:   ANTHROPIC_API_KEY, MODEL
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const dir = process.argv[2] ?? '.';
 const MODEL = process.env.MODEL || 'claude-opus-5-5';
@@ -89,6 +90,19 @@ async function askModel(context) {
 
 const esc = s => String(s).replace(/[|\r\n]+/g, ' ').replace(/</g, '&lt;').slice(0, 400);
 
+// The final verdict is the highest of the model's verdict, each of its findings' severities
+// and the deterministic flags; anything unrecognised counts as high, and a truncated context
+// can't be low.
+export function finalVerdict(model, facts) {
+  const rank = s => (Object.hasOwn(RANK, s) ? s : 'high');
+  let verdict = rank(model?.verdict);
+  for (const s of [...(facts?.flags ?? []).map(f => f?.severity), ...(model?.findings ?? []).map(f => f?.severity)]) {
+    if (RANK[rank(s)] > RANK[verdict]) verdict = rank(s);
+  }
+  if (facts?.truncated && verdict === 'low') verdict = 'medium';
+  return verdict;
+}
+
 async function main() {
   const facts = JSON.parse(readFileSync(`${dir}/facts.json`, 'utf8'));
   const context = readFileSync(`${dir}/context.md`, 'utf8');
@@ -107,16 +121,7 @@ async function main() {
     catch (e) { model = { verdict: 'high', summary: `AI review failed, so this fails closed: ${e.message}`, findings: [] }; }
   }
 
-  // Deterministic floor: flags from registry metadata can raise the verdict, and so can the
-  // model's own findings (the schema can't stop it pairing "low" with a high-severity finding).
-  let verdict = model.verdict;
-  for (const f of facts.flags) if (RANK[f.severity] > RANK[verdict]) verdict = f.severity;
-  for (const f of model.findings) {
-    const sev = Object.hasOwn(RANK, f?.severity) ? f.severity : 'high';
-    if (RANK[sev] > RANK[verdict]) verdict = sev;
-  }
-  if (facts.truncated && verdict === 'low') verdict = 'medium';
-
+  const verdict = finalVerdict(model, facts);
   const result = { verdict, modelVerdict: model.verdict, model: MODEL, summary: model.summary, findings: model.findings, flags: facts.flags, truncated: facts.truncated };
   writeFileSync(`${dir}/risk.json`, JSON.stringify(result, null, 2));
 
@@ -144,8 +149,11 @@ async function main() {
   console.log(`verdict=${verdict} (model=${model.verdict}, flags=${facts.flags.length})`);
 }
 
-main().catch(e => {
-  writeFileSync(`${dir}/risk.json`, JSON.stringify({ verdict: 'high', summary: `assessor crashed: ${e.message}` }));
-  writeFileSync(`${dir}/comment.md`, `${MARKER}\n### 🔴 Dependency risk: **HIGH**\n\nThe risk check crashed, so this fails closed: ${esc(e.message)}`);
-  console.error(e);
-});
+const isMain = () => { try { return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } };
+if (isMain()) {
+  main().catch(e => {
+    writeFileSync(`${dir}/risk.json`, JSON.stringify({ verdict: 'high', summary: `assessor crashed: ${e.message}` }));
+    writeFileSync(`${dir}/comment.md`, `${MARKER}\n### 🔴 Dependency risk: **HIGH**\n\nThe risk check crashed, so this fails closed: ${esc(e.message)}`);
+    console.error(e);
+  });
+}

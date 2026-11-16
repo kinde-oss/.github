@@ -8,9 +8,10 @@
 // Writes <outDir>/context.md (for the model) and <outDir>/facts.json (deterministic flags).
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, readdirSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
 const [baseSha, headSha, outDir = '.'] = process.argv.slice(2);
@@ -101,6 +102,43 @@ export function pnpmImporters(text) {
   return out;
 }
 
+// The parsers above understand pnpm lockfile formats 6.x (pnpm 8) and 9.x (pnpm 9 and later).
+export const SUPPORTED_LOCKFILE_VERSIONS = ['6', '9'];
+export const lockfileVersion = text => text.match(/^lockfileVersion:\s*['"]?(\d+)/m)?.[1] ?? null;
+
+// New lockfile entries the registry-based review can't cover: a key that isn't name@semver
+// (a URL, git or file key, which parsePnpmLock skips) or a resolution that points somewhere
+// other than the npm registry (tarball URL, git repo, local directory).
+const REGISTRY_KEY = /^\/?(?:@[^/@\s]+\/)?[^@/\s]+@\d+\.\d+\.\d+(?:[-+][^\s()]*)?(?:\(.*\))?$/;
+const NON_REGISTRY_RESOLUTION = /\b(tarball|repo|commit|directory|path|type):/;
+export function nonRegistryEntries(oldRes, newRes) {
+  return [...newRes]
+    .filter(([key, res]) => !oldRes.has(key) && (!REGISTRY_KEY.test(key) || NON_REGISTRY_RESOLUTION.test(res)))
+    .map(([key]) => key);
+}
+
+// name@version -> resolution, ignoring v6's leading "/" and peer suffixes.
+export function resolutionIndex(res) {
+  const out = new Map();
+  for (const [key, r] of res) out.set(key.replace(/^\//, '').replace(/\(.*$/, ''), r);
+  return out;
+}
+
+// Is what the lockfile installs for name@version the artifact the npm registry serves, which is
+// the one this check reviews? Returns a reason when it isn't, null when it matches or when the
+// registry has no record (that is flagged separately).
+export function registryMismatch(resolution, m) {
+  if (resolution === undefined) return 'no lockfile entry for this version';
+  const tarball = resolution.match(/tarball:\s*([^,}\s;]+)/)?.[1];
+  if (tarball && !tarball.startsWith('https://registry.npmjs.org/')) return `installs from ${tarball}, not the npm registry`;
+  if (!m) return null;
+  const lock = resolution.match(/integrity:\s*([^,}\s;]+)/)?.[1];
+  if (!lock) return 'lockfile has no integrity hash';
+  const sha1 = m.dist?.shasum ? `sha1-${Buffer.from(m.dist.shasum, 'hex').toString('base64')}` : null;
+  if (lock === m.dist?.integrity || (lock.startsWith('sha1-') && lock === sha1)) return null;
+  return 'lockfile integrity does not match the npm registry artifact';
+}
+
 // Semver precedence: numeric core first, a release sorts above its prereleases, numeric
 // prerelease identifiers sort below alphanumeric ones, build metadata is ignored.
 const cmpIds = (x, y) => {
@@ -172,32 +210,42 @@ function npmDiff(name, from, to) {
 }
 const diffFailed = d => d.startsWith('(npm diff failed');
 
-// Minimal in-memory reader for a gzipped tar: returns regular files as { name, body }.
-// Nothing is written to disk, and symlinks, hard links and devices are ignored.
+// Minimal in-memory reader for a gzipped tar. Nothing is written to disk. Returns regular files
+// as { name, body } plus `unsupported`: every entry it can't interpret the way npm's extractor
+// would (GNU long names, links, devices, global headers, base-256 sizes, a truncated archive).
+// Real npm tarballs only contain regular files and directories, so any unsupported entry means
+// the caller must treat the package as not inspected.
 export function readTarball(gz) {
   const data = gunzipSync(gz);
-  const files = [];
-  let off = 0, paxPath = null;
+  const files = [], unsupported = [];
+  let off = 0, pax = {};
   while (off + 512 <= data.length) {
     const h = data.subarray(off, off + 512);
     if (h.every(b => b === 0)) break;
     const field = (a, b) => h.subarray(a, b).toString('utf8').replace(/\0[\s\S]*$/, '');
-    const size = parseInt(field(124, 136).trim() || '0', 8);
     const type = h[156] === 0 ? '0' : String.fromCharCode(h[156]);
     const prefix = field(345, 500);
-    const name = paxPath ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
+    const name = pax.path ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
+    if (h[124] & 0x80) { unsupported.push(`${name} (base-256 size)`); break; }
+    const size = pax.size !== undefined ? Number(pax.size) : parseInt(field(124, 136).trim() || '0', 8);
+    if (!Number.isSafeInteger(size) || size < 0 || off + 512 + size > data.length) { unsupported.push(`${name} (bad or truncated size)`); break; }
     const body = data.subarray(off + 512, off + 512 + size);
     off += 512 + Math.ceil(size / 512) * 512;
-    if (type === 'x') { paxPath = body.toString('utf8').match(/\d+ path=([^\n]*)\n/)?.[1] ?? null; continue; }
-    paxPath = null;
+    if (type === 'x') {
+      pax = {};
+      for (const m of body.toString('utf8').matchAll(/\d+ ([^=\n]+)=([^\n]*)\n/g)) pax[m[1]] = m[2];
+      continue;
+    }
+    pax = {};
     if (type === '0' || type === '7') files.push({ name, body });
+    else if (type !== '5') unsupported.push(`${name} (type ${type})`);
   }
-  return files;
+  return { files, unsupported };
 }
 
 // Files that can't run on their own: docs, licences, type declarations, source maps, data,
 // styles, images. A doc-style name with a code extension (README.js) is still code.
-const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|ya?ml)$/i;
+const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|avif|bmp|ttf|otf|woff2?|eot|mp3|mp4|wav|webm|ya?ml)$/i;
 const CODE_EXT = /\.([cm]?[jt]sx?|node|wasm|sh)$/i;
 const isNonCode = f => NON_CODE.test(f) && !(CODE_EXT.test(f) && !/\.d\.[cm]?ts$/i.test(f));
 
@@ -205,22 +253,38 @@ const isNonCode = f => NON_CODE.test(f) && !(CODE_EXT.test(f) && !/\.d\.[cm]?ts$
 // that could contain code. Entry points declared in package.json (main, module, browser, every
 // exports target, bin) always count as code and go first. A file that looks like docs or data
 // is added too when the code shown mentions its name (e.g. require('./README.md')).
-// `inspected` is false when any code file is binary or the code doesn't fit the budget.
-export function inspectPackageFiles(files, budget = LIMITS.perNewPackage) {
-  const root = files[0]?.name.split('/')[0];
-  if (!root) return { text: '(empty package)', inspected: true };
-  const byName = new Map(files.map(f => [f.name.slice(root.length + 1), f.body]));
+// `inspected` is false when any code file is binary, the code doesn't fit the budget, a declared
+// entry point doesn't exist as read, or the tarball had entries the reader doesn't support.
+//
+// Paths follow npm's extraction: the first path component of each entry is stripped (so mixed
+// root folders land in one tree), leading slashes are dropped, entries at the top level or that
+// climb out with ".." are skipped, and a later entry for the same path wins.
+export function inspectPackageFiles(files, { budget = LIMITS.perNewPackage, unsupported = [] } = {}) {
+  const byName = new Map();
+  for (const f of files) {
+    const name = f.name.replace(/^\/+/, '');
+    const slash = name.indexOf('/');
+    if (slash < 0) continue;
+    const rel = posix.normalize(name.slice(slash + 1));
+    if (!rel || rel === '.' || rel === '..' || rel.startsWith('../')) continue;
+    byName.delete(rel); // keep insertion order matching the last write
+    byName.set(rel, f.body);
+  }
   const pkgText = byName.get('package.json')?.toString('utf8') ?? '';
   let pkg = {};
   try { pkg = JSON.parse(pkgText); } catch { /* shown raw below */ }
+  // Every runtime target in exports/bin; "types"/"typings" conditions never run, so skip them.
   const leaves = e => typeof e === 'string' ? [e]
     : Array.isArray(e) ? e.flatMap(leaves)
-    : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
-  const entries = new Set([...leaves(pkg.exports), pkg.main, pkg.module, typeof pkg.browser === 'string' ? pkg.browser : null, ...leaves(pkg.bin), 'index.js']
-    .filter(p => typeof p === 'string')
-    .map(p => p.replace(/^\.?\//, ''))
-    .flatMap(p => [p, `${p}.js`, `${p}/index.js`])
-    .filter(p => byName.has(p)));
+    : e && typeof e === 'object' ? Object.entries(e).filter(([k]) => k !== 'types' && k !== 'typings').flatMap(([, v]) => leaves(v)) : [];
+  const resolve = p => [p, `${p}.js`, `${p}.json`, `${p}.node`, `${p}/index.js`, `${p}/index.json`].find(c => byName.has(c));
+  const declared = [...leaves(pkg.exports), pkg.main, pkg.module, typeof pkg.browser === 'string' ? pkg.browser : null, ...leaves(pkg.bin)]
+    // Skip wildcard and folder ("./dir/") subpath patterns, and an empty main (types-only packages).
+    .filter(p => typeof p === 'string' && p.trim() !== '' && !p.includes('*') && !p.endsWith('/'))
+    .map(p => posix.normalize(p.replace(/^\.?\//, '') || '.'))
+    .map(p => (p === '.' ? 'index' : p));
+  const missing = declared.filter(p => !resolve(p));
+  const entries = new Set([...declared, 'index.js'].map(resolve).filter(Boolean));
   const names = [...byName.keys()].filter(f => f !== 'package.json');
   const code = [...entries, ...names.filter(f => !entries.has(f) && !isNonCode(f))];
   const skipped = names.filter(f => !entries.has(f) && isNonCode(f));
@@ -228,6 +292,8 @@ export function inspectPackageFiles(files, budget = LIMITS.perNewPackage) {
   let text = `files:\n${truncate([...byName].map(([f, b]) => `${f} (${b.length} bytes)`).join('\n'), 2_000)}\n` +
     `package.json:\n${truncate(pkgText, 2_000)}\n`;
   let inspected = true, shown = '';
+  if (unsupported.length) { inspected = false; text += `\n(tarball entries this check can't read: ${unsupported.slice(0, 10).join(', ')})\n`; }
+  if (missing.length) { inspected = false; text += `\n(declared entry points not found in the tarball: ${missing.slice(0, 10).join(', ')})\n`; }
   const show = f => {
     const body = byName.get(f);
     if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; return true; }
@@ -249,7 +315,9 @@ export function newPackageSource(name, version) {
     execFileSync('npm', ['pack', `${name}@${version}`, '--ignore-scripts', '--pack-destination', dir],
       { timeout: 60_000, stdio: ['ignore', 'ignore', 'ignore'] });
     const tgz = readdirSync(dir).find(f => f.endsWith('.tgz'));
-    return tgz ? inspectPackageFiles(readTarball(readFileSync(join(dir, tgz)))) : null;
+    if (!tgz) return null;
+    const { files, unsupported } = readTarball(readFileSync(join(dir, tgz)));
+    return inspectPackageFiles(files, { unsupported });
   } catch {
     return null;
   } finally {
@@ -347,6 +415,11 @@ async function main() {
   const sections = [];
   const notReviewed = []; // updates whose published code never reached the model
 
+  // Set by the workflow: commits on the PR not authored by the bot (or, if required, not
+  // verified). The job only checks who opened the PR; anyone with push access can add commits.
+  const foreign = (process.env.FOREIGN_COMMITS ?? '').trim();
+  if (foreign) facts.flags.push({ severity: 'medium', package: 'PR commits', reason: `commits not authored by the bot or not verified: ${foreign.split(/\s+/).slice(0, 10).join(', ')}` });
+
   // Anything this collector can't analyse must not pass as "low" just because nothing was found.
   // Understood: pnpm lockfiles, package.json next to a lockfile change, and workflow/action files
   // (whose non-`uses:` lines are flagged separately below).
@@ -377,9 +450,21 @@ async function main() {
   // Lockfile changes
   for (const f of changed.filter(f => f.endsWith('pnpm-lock.yaml'))) {
     const oldText = gitShow(baseSha, f), newText = gitShow(headSha, f);
+    // Without a lockfile, installs resolve whatever versions are current: nothing reviewed.
+    if (oldText && !newText) facts.flags.push({ severity: 'medium', package: f, reason: 'lockfile deleted, so installs are no longer pinned to reviewed versions' });
+    const unsupported =[...new Set([newText, oldText].filter(Boolean).map(t => lockfileVersion(t)))]
+      .filter(v => !SUPPORTED_LOCKFILE_VERSIONS.includes(v));
+    if (unsupported.length) facts.flags.push({ severity: 'medium', package: f, reason: `unsupported pnpm lockfile version ${unsupported.join(', ')} (only ${SUPPORTED_LOCKFILE_VERSIONS.map(v => `${v}.x`).join(' and ')} can be read)` });
     const oldRes = pnpmResolutions(oldText), newRes = pnpmResolutions(newText);
+    const newResByVersion = resolutionIndex(newRes);
     const reResolved = [...newRes].filter(([k, v]) => oldRes.has(k) && oldRes.get(k) !== v).map(([k]) => k);
     if (reResolved.length) facts.flags.push({ severity: 'medium', package: reResolved.slice(0, 10).join(', '), reason: 'lockfile resolution or integrity changed without a version change' });
+    for (const key of reResolved) {
+      const offRegistry = registryMismatch(newRes.get(key), null); // without a manifest, only a non-registry tarball is reported
+      if (offRegistry) facts.flags.push({ severity: 'high', package: key, reason: `what the lockfile installs is not what was reviewed: ${offRegistry}` });
+    }
+    const exotic = nonRegistryEntries(oldRes, newRes);
+    if (exotic.length) facts.flags.push({ severity: 'medium', package: exotic.slice(0, 10).join(', '), reason: 'new lockfile entry that is not a plain npm registry package (URL, git, file or tarball source), which is not reviewed' });
     const { updated, added, removed } = diffLocks(parsePnpmLock(oldText), parsePnpmLock(newText));
 
     // A package (importer) can move between versions that are both in the lockfile before and
@@ -405,6 +490,12 @@ async function main() {
     }
     if (odd.length) facts.flags.push({ severity: 'medium', package: odd.slice(0, 10).join(', '), reason: 'resolved to a non-registry or aliased version (link:, file:, git, npm: alias), which is not reviewed' });
 
+    // The lockfile changed but none of the checks above recognised what changed, so nothing
+    // about it was reviewed.
+    if (oldText !== newText && !updated.length && !added.length && !removed.length && !reResolved.length && !exotic.length && !odd.length && !unsupported.length) {
+      facts.flags.push({ severity: 'medium', package: f, reason: 'lockfile changed but no package change was recognised' });
+    }
+
     updated.sort((a, b) => Number(direct.has(b.name)) - Number(direct.has(a.name)));
     sections.push(`## Lockfile ${f}\n- updated: ${updated.length}\n- newly added packages: ${added.length}\n- removed: ${removed.length}`);
 
@@ -424,6 +515,8 @@ async function main() {
       if (entry.provenanceFrom && !entry.provenanceTo) facts.flags.push({ severity: 'high', package: u.name, reason: 'previous version had npm provenance, new version does not' });
       if (entry.publisherFrom && entry.publisherTo && entry.publisherFrom !== entry.publisherTo) facts.flags.push({ severity: 'medium', package: u.name, reason: `publisher changed ${entry.publisherFrom} -> ${entry.publisherTo}` });
       if (entry.registryMissing) facts.flags.push({ severity: 'medium', package: u.name, reason: 'new version not found on the npm registry' });
+      const mismatch = registryMismatch(newResByVersion.get(`${u.name}@${u.to}`), mn);
+      if (mismatch) facts.flags.push({ severity: 'high', package: `${u.name}@${u.to}`, reason: `what the lockfile installs is not what was reviewed: ${mismatch}` });
       facts.packages.push(entry);
 
       let body = `### ${u.name} ${u.from} → ${u.to}${entry.direct ? ' (direct)' : ' (transitive)'}\n` +
@@ -446,6 +539,9 @@ async function main() {
       const m = await manifest(a.name, a.version);
       const entry = { ...a, publisher: publisher(m), provenance: hasProvenance(m), installScripts: installScripts(m), description: m?.description ?? null };
       if (Object.keys(entry.installScripts).length) facts.flags.push({ severity: 'high', package: a.name, reason: `newly added package has install scripts: ${Object.keys(entry.installScripts).join(', ')}` });
+      if (!m) facts.flags.push({ severity: 'medium', package: a.name, reason: 'new package version not found on the npm registry' });
+      const mismatch = registryMismatch(newResByVersion.get(`${a.name}@${a.version}`), m);
+      if (mismatch) facts.flags.push({ severity: 'high', package: `${a.name}@${a.version}`, reason: `what the lockfile installs is not what was reviewed: ${mismatch}` });
       facts.newPackages.push(entry);
       const src = i < LIMITS.maxNewPackagesInspected ? newPackageSource(a.name, a.version) : null;
       if (!src?.inspected) notReviewed.push(`${a.name}@${a.version}`);
@@ -524,6 +620,7 @@ async function main() {
   console.log(`packages updated: ${facts.packages.length}, new: ${facts.newPackages.length}, actions: ${facts.actions.length}, flags: ${facts.flags.length}, context chars: ${context.length}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const isMain = () => { try { return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { return false; } };
+if (isMain()) {
   main().catch(e => { console.error(e); process.exit(1); });
 }
