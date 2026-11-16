@@ -14,10 +14,13 @@ It only understands pnpm lockfiles (format 6.x or 9.x), `package.json` and GitHu
      - provenance
      - install scripts
      - new dependencies
-     - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile
+     - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile. Only files that run when the package is used count towards the 100,000-character review budget: the new version's tarball decides which those are (entry points, code, and any doc or data file the code refers to). Docs, tests, type declarations, source maps and assets are listed by name instead.
      - for newly added packages, the published file list, `package.json`, its declared entry points and every other file that could contain code (up to 20,000 characters), read in memory from the tarball with the same path rules npm uses when extracting (nothing is unpacked or run)
    - It checks that each reviewed version is what the lockfile actually installs: the lockfile's integrity hash must match the npm registry's, and nothing may point at another tarball.
-   - For workflow files, it finds changed `uses:` refs and fetches the GitHub compare diff.
+   - For workflow files, it finds changed `uses:` refs and reviews what each action runs, within a 100,000-character budget per action:
+     - **Node actions:** `action.yml` and the folder the runtime entry files live in (usually `dist/`). GitHub's compare API leaves out the diff for large bundles, so those files are fetched at both refs and diffed here. The action's source, tests and workflows don't run, so they're shown only as context when there's room.
+     - **Composite actions:** `action.yml` and every file that isn't docs, data or tests.
+     - **Docker actions:** the image can't be reviewed, so these always need a human.
    - It also includes the Renovate PR description, which carries the release notes.
 2. **Deterministic flags** come from that metadata and set a minimum verdict:
    - install script added or changed → high
@@ -33,7 +36,16 @@ It only understands pnpm lockfiles (format 6.x or 9.x), `package.json` and GitHu
    - `package.json` changed outside its dependency fields (`packageManager`, `engines`, `overrides`, `scripts`, ...) → medium
    - workflow lines changed other than action `uses:` refs (`docker://` images, `run:` steps, ...) → medium
    - lockfile resolution or integrity changed without a version change → medium
-   - an update whose published code never reached the model (past the 40-diff limit, the diff, compare or tarball couldn't be fetched or failed partway, a new package's code is binary or over 20,000 characters, its tarball has entries the reader can't interpret like npm would, or an entry point declared in its `package.json` or a nested one is missing) → medium
+   - an update whose code that runs wasn't fully shown to the model → medium. That covers:
+     - changed runnable code over the review budget, or binary;
+     - past the 40-diff limit;
+     - the diff, compare or tarball couldn't be fetched, or failed partway;
+     - a new package's code is binary or over 20,000 characters;
+     - a tarball has entries the reader can't interpret like npm would;
+     - an entry point declared in a `package.json` (or a nested one) is missing;
+     - a Docker action.
+
+     Large updates (framework bundles, big rebuilt action bundles) usually land here and need a human; small and patch updates usually don't.
    - a `package.json` dependency spec change that doesn't move that dependency to a new resolved version in its own lockfile importer (including when the entry disappears) → medium
    - a dependency resolved to a non-registry or aliased version (`link:`, `file:`, git, `npm:` alias) → medium
    - an action ref removed with no replacement at the same site (a deleted step), or several refs for one action changed together so they can't be paired → medium

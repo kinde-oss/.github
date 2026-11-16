@@ -16,10 +16,13 @@ import { gunzipSync } from 'node:zlib';
 
 const [baseSha, headSha, outDir = '.'] = process.argv.slice(2);
 
+// Budgets apply to code that runs; docs, tests, data and assets are listed instead of shown.
+// Code that runs but doesn't fit means "not reviewed", so the PR comes back medium.
 const LIMITS = {
-  totalChars: 180_000,       // overall context budget
-  perPackageDiff: 12_000,    // npm diff per package
-  perActionDiff: 8_000,      // GitHub compare diff per action
+  totalChars: 600_000,       // overall context budget (about 150k tokens)
+  perPackageCode: 100_000,   // changed code that runs, per updated npm package
+  perActionCode: 100_000,    // changed code that runs, per GitHub Action (action.yml + runtime bundle)
+  workflowLines: 8_000,      // workflow lines outside uses: refs, shown for context
   perNewPackage: 20_000,     // code shown per new package (plus its file list and package.json)
   prBody: 20_000,
   maxPackagesDiffed: 40,
@@ -199,7 +202,7 @@ const hasProvenance = m => Boolean(m?.dist?.attestations?.provenance || m?.dist?
 const publisher = m => m?._npmUser?.name ?? null;
 const depNames = m => Object.keys({ ...(m?.dependencies ?? {}), ...(m?.optionalDependencies ?? {}) });
 
-function npmDiff(name, from, to) {
+export function npmDiff(name, from, to) {
   try {
     return execFileSync('npm', ['diff', `--diff=${name}@${from}`, `--diff=${name}@${to}`, '--diff-unified=2', '--diff-name-only=false'],
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -261,18 +264,23 @@ export function readTarball(gz) {
 const NON_CODE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|txt|d\.[cm]?ts|map|json|css|scss|less|html?|png|jpe?g|gif|svg|ico|webp|avif|bmp|ttf|otf|woff2?|eot|mp3|mp4|wav|webm|ya?ml)$/i;
 const CODE_EXT = /\.([cm]?[jt]sx?|node|wasm|sh)$/i;
 const isNonCode = f => NON_CODE.test(f) && !(CODE_EXT.test(f) && !/\.d\.[cm]?ts$/i.test(f));
+// Tests don't run when a package is used. Like docs, they only count as code when code refers to them.
+const TEST_PATH = /(^|\/)(__tests?__|__mocks__|tests?|specs?)\/|\.(test|spec)\.[cm]?[jt]sx?$/i;
+const isOptional = f => isNonCode(f) || TEST_PATH.test(f);
+// Never runnable: images, fonts, media.
+const INERT_ASSET = /\.(png|jpe?g|gif|ico|webp|avif|bmp|ttf|otf|woff2?|eot|mp3|mp4|wav|webm)$/i;
 
-// Decides what the model sees from a new package: the file list, package.json, then every file
-// that could contain code. Entry points declared in package.json (main, module, browser, every
-// exports target, bin) always count as code and go first. A file that looks like docs or data
-// is added too when the code shown mentions its name (e.g. require('./README.md')).
-// `inspected` is false when any code file is binary, the code doesn't fit the budget, a declared
-// entry point doesn't exist as read, or the tarball had entries the reader doesn't support.
-//
-// Paths follow npm's extraction: the first path component of each entry is stripped (so mixed
-// root folders land in one tree), leading slashes are dropped, entries at the top level or that
-// climb out with ".." are skipped, and a later entry for the same path wins.
-export function inspectPackageFiles(files, { budget = LIMITS.perNewPackage, unsupported = [] } = {}) {
+// Every name-like token in some code, so "does the code mention notes.md" is a set lookup.
+const codeTokens = text => new Set(text.match(/[\w.@$-]+/g) ?? []);
+
+// Which files of a package can run. Paths follow npm's extraction: the first path component of
+// each entry is stripped (so mixed root folders land in one tree), leading slashes are dropped,
+// entries at the top level or that climb out with ".." are skipped, and a later entry for the
+// same path wins. Code is: entry points declared by package.json or any nested package.json
+// (main, module, browser, every exports target, bin), nested manifests themselves, every file
+// that isn't docs, data, assets or tests, and any of those the code mentions by name
+// (e.g. require('./README.md'), which Node would run as JavaScript).
+export function classifyPackageFiles(files) {
   const byName = new Map();
   for (const f of files) {
     const name = f.name.replace(/^\/+/, '');
@@ -309,44 +317,117 @@ export function inspectPackageFiles(files, { budget = LIMITS.perNewPackage, unsu
   const missing = [...new Set(declared.filter(p => !resolve(p)))];
   const entries = new Set([...declared, 'index.js'].map(resolve).filter(Boolean));
   const names = [...byName.keys()].filter(f => f !== 'package.json');
-  // Nested manifests are shown like code so the model sees what they point at.
-  const code = [...entries, ...names.filter(f => !entries.has(f) && (!isNonCode(f) || nested.includes(f)))];
-  const skipped = names.filter(f => !entries.has(f) && isNonCode(f) && !nested.includes(f));
+  const nestedSet = new Set(nested);
+  const direct = new Set(names.filter(f => entries.has(f) || nestedSet.has(f) || !isOptional(f)));
+  const tokens = codeTokens([...direct].map(f => byName.get(f).toString('utf8')).join('\n'));
+  const referenced = f => !INERT_ASSET.test(f) && tokens.has(f.split('/').pop());
+  // Entry points first, then the rest of the code, then optional files the code refers to.
+  const code = [...new Set([...entries, ...direct, ...names.filter(f => !direct.has(f) && referenced(f))])];
+  return { byName, pkgText, entries, missing, code, codeSet: new Set(code) };
+}
 
+// Decides what the model sees from a new package: the file list, package.json, then every file
+// that could contain code (see classifyPackageFiles). `inspected` is false when any code file
+// is binary, the code doesn't fit the budget, a declared entry point doesn't exist as read, or
+// the tarball had entries the reader doesn't support.
+export function inspectPackageFiles(files, { budget = LIMITS.perNewPackage, unsupported = [] } = {}) {
+  const { byName, pkgText, missing, code } = classifyPackageFiles(files);
   let text = `files:\n${truncate([...byName].map(([f, b]) => `${f} (${b.length} bytes)`).join('\n'), 2_000)}\n` +
     `package.json:\n${truncate(pkgText, 2_000)}\n`;
-  let inspected = true, shown = '';
+  let inspected = true;
   if (unsupported.length) { inspected = false; text += `\n(tarball entries this check can't read: ${unsupported.slice(0, 10).join(', ')})\n`; }
   if (missing.length) { inspected = false; text += `\n(declared entry points not found in the tarball: ${missing.slice(0, 10).join(', ')})\n`; }
-  const show = f => {
+  for (const f of code) {
     const body = byName.get(f);
-    if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; return true; }
+    if (/\.(node|wasm)$/i.test(f) || body.includes(0)) { inspected = false; text += `\n--- ${f} (binary, not shown) ---\n`; continue; }
     const chunk = `\n--- ${f} ---\n${body.toString('utf8')}`;
-    if (chunk.length > budget) { inspected = false; text += `\n--- ${f} and later files: not shown, code budget reached ---\n`; return false; }
-    text += chunk; shown += chunk; budget -= chunk.length;
-    return true;
-  };
-  for (const f of code) if (!show(f)) return { text, inspected };
-  for (const f of skipped) if (shown.includes(f.split('/').pop()) && !show(f)) break;
+    if (chunk.length > budget) { inspected = false; text += `\n--- ${f} and later files: not shown, code budget reached ---\n`; break; }
+    text += chunk;
+    budget -= chunk.length;
+  }
   return { text, inspected };
 }
 
-// Published code of a newly added package. Downloads the tarball with scripts disabled and reads
-// it in memory, so nothing is unpacked or run. Returns null when it could not be read.
-export function newPackageSource(name, version) {
+// ---------- diff budgeting ----------
+// Split a git-style diff (npm diff and git diff both produce one) into one chunk per file.
+export function splitGitDiff(text) {
+  const chunks = [];
+  for (const part of text.split(/^(?=diff --git )/m)) {
+    const m = part.match(/^diff --git a\/(.+?) b\/(.+)$/m);
+    if (!m) continue;
+    chunks.push({
+      path: m[2],
+      text: part.replace(/\n$/, ''),
+      deleted: /^(deleted file mode|\+\+\+ \/dev\/null)/m.test(part),
+      binary: /^(Binary files .* differ|GIT binary patch)$/m.test(part),
+    });
+  }
+  return chunks;
+}
+
+// Fits per-file diff chunks into `budget` characters. Every `required` chunk (code that runs)
+// must be shown in full, or the review is incomplete; a required chunk that is binary or has no
+// text (its diff couldn't be produced) is incomplete too. `context` chunks are shown only while
+// there is room. Deleted files can't run, so they and everything else are listed by name.
+export function fitDiff(chunks, { required, context = () => false, budget }) {
+  let text = '', complete = true;
+  const live = chunks.filter(c => !c.deleted);
+  const req = live.filter(c => required(c.path));
+  const ctx = live.filter(c => !required(c.path) && context(c.path));
+  const listed = [...chunks.filter(c => c.deleted).map(c => `${c.path} (deleted)`), ...live.filter(c => !required(c.path) && !context(c.path)).map(c => c.path)];
+  for (const [i, c] of req.entries()) {
+    if (c.binary) { complete = false; text += `(${c.path}: binary change, not shown)\n`; continue; }
+    if (c.text == null) { complete = false; text += `(${c.path}: diff not available)\n`; continue; }
+    if (c.text.length + 1 > budget) {
+      complete = false;
+      text += `(code that runs, not shown because it is over the review budget: ${truncate(req.slice(i).map(x => x.path).join(', '), 1_000)})\n`;
+      budget = 0;
+      break;
+    }
+    text += c.text + '\n';
+    budget -= c.text.length + 1;
+  }
+  const noRoom = [];
+  for (const c of ctx) {
+    if (!c.binary && c.text != null && c.text.length + 1 <= budget) { text += c.text + '\n'; budget -= c.text.length + 1; }
+    else noRoom.push(c.path);
+  }
+  if (noRoom.length) text += `(changed source or context not shown, no room: ${truncate(noRoom.join(', '), 1_000)})\n`;
+  if (listed.length) text += `(changed but not run when the package is used: ${truncate(listed.join(', '), 1_000)})\n`;
+  return { text, complete };
+}
+
+// A published package's files. Downloads the tarball with scripts disabled and reads it in
+// memory, so nothing is unpacked or run. Returns null when it could not be read.
+export function packageFiles(name, version) {
   const dir = mkdtempSync(join(tmpdir(), 'dependency-risk-'));
   try {
     execFileSync('npm', ['pack', `${name}@${version}`, '--ignore-scripts', '--pack-destination', dir],
       { timeout: 60_000, stdio: ['ignore', 'ignore', 'ignore'] });
     const tgz = readdirSync(dir).find(f => f.endsWith('.tgz'));
-    if (!tgz) return null;
-    const { files, unsupported } = readTarball(readFileSync(join(dir, tgz)));
-    return inspectPackageFiles(files, { unsupported });
+    return tgz ? readTarball(readFileSync(join(dir, tgz))) : null;
   } catch {
     return null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// Published code of a newly added package, or null when it could not be read.
+export function newPackageSource(name, version) {
+  const pf = packageFiles(name, version);
+  return pf ? inspectPackageFiles(pf.files, { unsupported: pf.unsupported }) : null;
+}
+
+// The npm diff of an updated package, fitted so every changed file that runs is shown in full.
+// Which files run comes from the new version's own tarball; if that can't be read cleanly,
+// every changed file except images, fonts and media counts.
+export function reviewNpmDiff(diff, newFiles, budget = LIMITS.perPackageCode) {
+  const cls = newFiles && !newFiles.unsupported.length ? classifyPackageFiles(newFiles.files) : null;
+  const required = cls
+    ? p => cls.codeSet.has(p) || p === 'package.json' || p.endsWith('/package.json')
+    : p => !INERT_ASSET.test(p);
+  return { ...fitDiff(splitGitDiff(diff), { required, budget }), classified: Boolean(cls) };
 }
 
 // ---------- GitHub Actions ----------
@@ -413,18 +494,137 @@ export function unreviewedWorkflowLines(patch) {
     });
 }
 
-async function actionCompare(action, from, to) {
-  const [owner, repo] = action.split('/');
-  if (!owner || !repo || !from) return null;
-  const headers = { accept: 'application/vnd.github+json' };
-  if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+// ---------- GitHub API ----------
+const ghHeaders = accept => ({ accept, ...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) });
+async function ghJson(path) {
+  const r = await fetch(`https://api.github.com${path}`, { headers: ghHeaders('application/vnd.github+json') });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+// A file's raw bytes at a ref, or null if it doesn't exist there.
+async function ghFile(owner, repo, path, ref) {
+  const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`,
+    { headers: ghHeaders('application/vnd.github.raw') });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`HTTP ${r.status} reading ${path}`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+// The `runs:` block of an action.yml: using, main, pre, post, image.
+export function parseActionRuns(text) {
+  const out = {};
+  let inRuns = false, indent = null;
+  for (const line of text.split('\n')) {
+    if (/^runs:\s*(#.*)?$/.test(line)) { inRuns = true; continue; }
+    if (!inRuns || /^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) break;
+    const lead = line.match(/^\s+/)[0].length;
+    indent ??= lead;
+    if (lead !== indent) continue;
+    const m = line.match(/^\s+(using|main|pre|post|image):\s*['"]?([^'"#\s]+)['"]?/);
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+// A unified diff of two versions of a file, made with git so it's exact whatever the size.
+function diffBuffers(oldBuf, newBuf, path) {
+  const dir = mkdtempSync(join(tmpdir(), 'dependency-risk-diff-'));
   try {
-    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/compare/${from.ref}...${to.ref}`, { headers });
-    if (!r.ok) return `(compare unavailable: HTTP ${r.status})`;
-    const j = await r.json();
-    const files = (j.files ?? []).map(f => `### ${f.filename} (+${f.additions}/-${f.deletions})\n${f.patch ?? '(binary or too large)'}`).join('\n');
-    return `commits: ${j.total_commits}, files changed: ${(j.files ?? []).length}\n${files}`;
-  } catch (e) { return `(compare failed: ${e.message})`; }
+    writeFileSync(join(dir, 'a'), oldBuf ?? '');
+    writeFileSync(join(dir, 'b'), newBuf ?? '');
+    let out;
+    try {
+      out = execFileSync('git', ['diff', '--no-index', '--no-color', '-U2', 'a', 'b'], { cwd: dir, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (e) {
+      if (e.status !== 1 || e.stdout == null) throw e; // 1 just means the files differ
+      out = String(e.stdout);
+    }
+    return out.replace(/^diff --git a\/a b\/b$/m, `diff --git a/${path} b/${path}`)
+      .replace(/^--- a\/a$/m, `--- a/${path}`).replace(/^\+\+\+ b\/b$/m, `+++ b/${path}`).replace(/\n$/, '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Reviews one action ref change. What runs must be shown in full:
+// - node actions: action.yml plus the folder the runtime entry files live in (usually dist/).
+//   GitHub's compare omits the patch for big bundles, so those files are diffed here from both
+//   refs. Source, tests and the action repo's own workflows don't run and are context only.
+// - composite actions: action.yml and every file that isn't docs, data or tests.
+// - docker and anything else: the image can't be reviewed, so it's never complete.
+// Returns { text, complete }, or null for a newly introduced action (flagged separately).
+export async function reviewAction(c, budget = LIMITS.perActionCode) {
+  const [owner, repo, ...sub] = c.action.split('/');
+  if (!owner || !repo || !c.from) return null;
+  const at = p => posix.normalize(sub.length ? `${sub.join('/')}/${p}` : p);
+  const notes = [];
+  let complete = true;
+  let j;
+  try {
+    j = await ghJson(`/repos/${owner}/${repo}/compare/${encodeURIComponent(c.from.ref)}...${encodeURIComponent(c.to.ref)}`);
+  } catch (e) {
+    return { text: `(compare unavailable: ${e.message})`, complete: false };
+  }
+  const files = j.files ?? [];
+  if (files.length >= 300) { complete = false; notes.push('the compare returned 300 files, the API maximum, so changes may be missing'); }
+
+  const ymls = [at('action.yml'), at('action.yaml')];
+  let yml = null, runs = {};
+  try { yml = (await ghFile(owner, repo, ymls[0], c.to.ref)) ?? (await ghFile(owner, repo, ymls[1], c.to.ref)); } catch { /* handled below */ }
+  if (yml) runs = parseActionRuns(yml.toString('utf8'));
+  else { complete = false; notes.push('could not read action.yml at the new ref'); }
+  const using = (runs.using ?? '').toLowerCase();
+  const node = /^node\d*$/.test(using);
+  const entries = node ? [...new Set(['main', 'pre', 'post'].map(k => runs[k]).filter(Boolean).map(p => at(p.replace(/^\.?\//, ''))))] : [];
+  const entryDirs = [...new Set(entries.map(e => posix.dirname(e)))];
+  if (yml && !node && using !== 'composite') { complete = false; notes.push(`"${runs.using ?? 'unknown'}" action${runs.image ? ` (image ${runs.image})` : ''}: what runs can't be reviewed`); }
+
+  // Names the runtime code refers to, so docs or data it loads count as code.
+  let refText = yml?.toString('utf8') ?? '';
+  for (const e of entries) {
+    try {
+      const body = await ghFile(owner, repo, e, c.to.ref);
+      if (body) refText += '\n' + body.toString('utf8');
+      else { complete = false; notes.push(`entry file ${e} not found at the new ref`); }
+    } catch (err) { complete = false; notes.push(`could not read ${e}: ${err.message}`); }
+  }
+  const tokens = codeTokens(refText);
+  const referenced = p => !INERT_ASSET.test(p) && tokens.has(p.split('/').pop());
+  const repoMeta = p => p.startsWith('.github/') && !ymls.includes(p);
+  const optional = p => isOptional(p) || repoMeta(p);
+  const runsFrom = p => entryDirs.some(d => (d === '.' && !sub.length) || p === d || p.startsWith(`${d}/`));
+  const required = p => ymls.includes(p) || entries.includes(p) || referenced(p)
+    || (node ? runsFrom(p) && !optional(p) : !optional(p));
+  const context = p => !optional(p);
+
+  // Build chunks; files that run but have no patch are diffed here, until the budget is spent.
+  let spent = 0;
+  const chunks = [];
+  for (const f of files) {
+    const path = f.filename;
+    const chunk = { path, deleted: f.status === 'removed', binary: false, text: null };
+    if (f.patch !== undefined) chunk.text = `diff --git a/${f.previous_filename ?? path} b/${path}\n${f.patch}`;
+    else if (!chunk.deleted && required(path) && spent <= budget) {
+      try {
+        const [before, after] = await Promise.all([
+          f.status === 'added' ? Buffer.alloc(0) : ghFile(owner, repo, f.previous_filename ?? path, c.from.ref),
+          ghFile(owner, repo, path, c.to.ref),
+        ]);
+        if (before === null || after === null) notes.push(`could not fetch both versions of ${path}`);
+        else if (before.includes(0) || after.includes(0)) chunk.binary = true;
+        else chunk.text = diffBuffers(before, after, path);
+      } catch (err) { notes.push(`could not fetch ${path}: ${err.message}`); }
+    }
+    if (chunk.text) spent += chunk.text.length;
+    chunks.push(chunk);
+  }
+  const fitted = fitDiff(chunks, { required, context, budget });
+  const head = `using: ${runs.using ?? '?'}${entries.length ? `, runs ${entries.join(', ')}` : ''}; commits: ${j.total_commits}, files changed: ${files.length}\n`;
+  return {
+    text: head + (notes.length ? `(${notes.join('; ')})\n` : '') + fitted.text,
+    complete: complete && fitted.complete,
+  };
 }
 
 // ---------- main ----------
@@ -435,7 +635,7 @@ async function main() {
   }
   mkdirSync(outDir, { recursive: true });
   const changed = git('diff', '--name-only', `${baseSha}...${headSha}`).split('\n').filter(Boolean);
-  const facts = { packages: [], newPackages: [], actions: [], flags: [], changedFiles: changed, diffsTruncated: 0 };
+  const facts = { packages: [], newPackages: [], actions: [], flags: [], changedFiles: changed };
   const sections = [];
   const notReviewed = []; // updates whose published code never reached the model
 
@@ -549,11 +749,16 @@ async function main() {
         `- new dependencies: ${entry.newDeps.join(', ') || 'none'}\n`;
       if (i < LIMITS.maxPackagesDiffed) {
         const d = npmDiff(u.name, u.from, u.to);
-        if (diffFailed(d)) notReviewed.push(`${u.name}@${u.to}`);
-        else if (d.length > LIMITS.perPackageDiff) facts.diffsTruncated++;
-        body += '```diff\n' + truncate(d, LIMITS.perPackageDiff) + '\n```\n';
+        if (diffFailed(d)) {
+          notReviewed.push(`${u.name}@${u.to} (npm diff failed)`);
+          body += '```diff\n' + truncate(d, 4_000) + '\n```\n';
+        } else {
+          const r = reviewNpmDiff(d, packageFiles(u.name, u.to));
+          if (!r.complete) notReviewed.push(`${u.name}@${u.to} (${r.classified ? 'changed code over the review budget or binary' : 'files could not be classified'})`);
+          body += '```diff\n' + r.text + '```\n';
+        }
       } else {
-        notReviewed.push(`${u.name}@${u.to}`);
+        notReviewed.push(`${u.name}@${u.to} (past the ${LIMITS.maxPackagesDiffed}-package diff limit)`);
         body += '(diff skipped: package limit reached)\n';
       }
       sections.push(body);
@@ -609,7 +814,7 @@ async function main() {
     const other = unreviewedWorkflowLines(patch);
     if (other.length) {
       facts.flags.push({ severity: 'medium', package: 'workflow files', reason: `${other.length} changed workflow line(s) other than action uses: refs (e.g. docker:// images, run steps)` });
-      sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join('\n'), LIMITS.perActionDiff) + '\n```');
+      sections.push('### Workflow lines outside action refs (not reviewed)\n```diff\n' + truncate(other.join("\n"), LIMITS.workflowLines) + '\n```');
     }
     const { changes, unpaired, ambiguous } = parseActionChanges(patch);
     if (ambiguous.length) facts.flags.push({ severity: 'medium', package: [...new Set(ambiguous.map(u => u.action))].slice(0, 10).join(', '), reason: 'several refs for the same action changed in one block, so old and new refs could not be paired reliably' });
@@ -617,10 +822,9 @@ async function main() {
     for (const c of changes) {
       facts.actions.push(c);
       if (!c.from) facts.flags.push({ severity: 'medium', package: c.action, reason: 'new GitHub Action introduced' });
-      const cmp = await actionCompare(c.action, c.from, c.to);
-      if (cmp?.startsWith('(compare')) notReviewed.push(`${c.action}@${c.to.tag ?? c.to.ref}`);
-      else if (cmp && cmp.length > LIMITS.perActionDiff) facts.diffsTruncated++;
-      sections.push(`### Action ${c.action} ${c.from?.tag ?? c.from?.ref ?? '(new)'} → ${c.to.tag ?? c.to.ref}\n` + '```diff\n' + truncate(cmp ?? '(no compare)', LIMITS.perActionDiff) + '\n```');
+      const r = await reviewAction(c);
+      if (r && !r.complete) notReviewed.push(`${c.action}@${c.to.tag ?? c.to.ref} (code that runs not fully reviewed)`);
+      sections.push(`### Action ${c.action} ${c.from?.tag ?? c.from?.ref ?? '(new)'} → ${c.to.tag ?? c.to.ref}\n` + '```diff\n' + (r?.text ?? '(no compare: new action)') + '\n```');
     }
   }
 
@@ -628,7 +832,7 @@ async function main() {
   // (A diff cut at its per-item limit still reaches the model, which is told to weigh that.)
   if (notReviewed.length) {
     const list = notReviewed.slice(0, 10).join(', ') + (notReviewed.length > 10 ? ` (+${notReviewed.length - 10} more)` : '');
-    facts.flags.push({ severity: 'medium', package: list, reason: `published code not reviewed for ${notReviewed.length} update(s): diff skipped at the size limit or could not be fetched` });
+    facts.flags.push({ severity: 'medium', package: list, reason: `published code that runs was not fully reviewed for ${notReviewed.length} update(s)` });
   }
 
   // Release notes from the Renovate PR body

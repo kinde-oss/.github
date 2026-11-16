@@ -77,7 +77,7 @@ async function askModel(context) {
         content: `<untrusted_dependency_data>\n${context.replaceAll('</untrusted_dependency_data>', '[removed]')}\n</untrusted_dependency_data>\n\nAssess these updates and call report_verdict.`,
       }],
     }),
-    signal: AbortSignal.timeout(240_000),
+    signal: AbortSignal.timeout(600_000), // up to ~150k tokens of context
   });
   if (!r.ok) throw new Error(`Anthropic API HTTP ${r.status}: ${(await r.text()).slice(0, 500)}`);
   const j = await r.json();
@@ -137,7 +137,6 @@ async function main() {
     esc(model.summary),
     '',
     `Scope: ${facts.packages.length} updated npm packages, ${facts.newPackages.length} new, ${facts.actions.length} GitHub Actions.` +
-      (facts.diffsTruncated ? ` ${facts.diffsTruncated} diff(s) were cut at the per-package limit.` : '') +
       (facts.truncated ? ' Context was truncated.' : ''),
     rows.length ? '\n| Package | Severity | Reason | Source |\n| --- | --- | --- | --- |\n' + rows.join('\n') : '',
     '',
