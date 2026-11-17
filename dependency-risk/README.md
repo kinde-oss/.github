@@ -14,12 +14,13 @@ It only understands pnpm lockfiles (format 6.x or 9.x), `package.json` and GitHu
      - provenance
      - install scripts
      - new dependencies
-     - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile. Only files that run when the package is used count towards the 100,000-character review budget: the new version's tarball decides which those are (entry points, code, and any doc or data file the code refers to). Docs, tests, type declarations, source maps and assets are listed by name instead.
+     - the published code diff (`npm diff`) for updated packages, the first 40 in each lockfile. Only files that run when the package is used count towards the 100,000-character review budget: the new version's tarball decides which those are (entry points, code, and any file the code refers to, with or without the extension Node adds, followed through every file it reaches). Changed data files (JSON, YAML, text, ...) always count, because code can load them by a name built at runtime. Docs, tests, type declarations, source maps and assets are listed by name instead. A changed binary file that runs, such as a `.node` addon, can't be shown, so it means not fully reviewed.
      - for newly added packages, the published file list, `package.json`, its declared entry points and every other file that could contain code (up to 20,000 characters), read in memory from the tarball with the same path rules npm uses when extracting (nothing is unpacked or run)
    - It checks that each reviewed version is what the lockfile actually installs: the lockfile's integrity hash must match the npm registry's, and nothing may point at another tarball.
    - For workflow files, it finds changed `uses:` refs and reviews what each action runs, within a 100,000-character budget per action:
-     - **Node actions:** `action.yml` and the folder the runtime entry files live in (usually `dist/`). GitHub's compare API leaves out the diff for large bundles, so those files are fetched at both refs and diffed here. The action's source, tests and workflows don't run, so they're shown only as context when there's room.
-     - **Composite actions:** `action.yml` and every file that isn't docs, data or tests.
+     - **Node actions:** `action.yml`, the folder the runtime entry files live in (usually `dist/`), and any file the runtime code refers to (with or without the extension Node adds). GitHub's compare API leaves out the diff for large bundles, so those files are fetched at both refs and diffed here. The rest of the action's source, tests and workflows don't run, so they're shown only as context when there's room.
+     - **Composite actions:** `action.yml` and every file that isn't docs or data, tests included, since `run:` steps can execute anything in the repo.
+     - **Any action:** if `action.yml` now runs something else (another entry file or action type), the newly selected code may be unchanged and absent from the compare, so the update needs a human.
      - **Docker actions:** the image can't be reviewed, so these always need a human.
    - It also includes the Renovate PR description, which carries the release notes.
 2. **Deterministic flags** come from that metadata and set a minimum verdict:

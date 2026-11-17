@@ -272,9 +272,36 @@ const TEST_PATH = /(^|\/)(__tests?__|__mocks__|tests?|specs?)\/|\.(test|spec)\.[
 const isOptional = f => isNonCode(f) || TEST_PATH.test(f);
 // Never runnable: images, fonts, media.
 const INERT_ASSET = /\.(png|jpe?g|gif|ico|webp|avif|bmp|ttf|otf|woff2?|eot|mp3|mp4|wav|webm)$/i;
+// Compiled or archived files a text diff can't show.
+const BINARY_EXT = /\.(node|wasm|exe|dll|so|dylib|bin|o|a|lib|jar|class|pyc|zip|gz|tgz|tar|7z)$/i;
+// Changed files an npm diff review may skip unless code refers to them: docs, type declarations,
+// source maps, styles, markup, assets and tests. Data files (JSON, YAML, text, ...) are never
+// skipped, because unchanged code can load them by a name built at runtime.
+const DIFF_SKIPPABLE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|d\.[cm]?ts|map|css|scss|less|html?|svg)$/i;
+const skippableInDiff = p => (DIFF_SKIPPABLE.test(p) && !(CODE_EXT.test(p) && !/\.d\.[cm]?ts$/i.test(p))) || INERT_ASSET.test(p) || TEST_PATH.test(p);
 
 // Every name-like token in some code, so "does the code mention notes.md" is a set lookup.
-const codeTokens = text => new Set(text.match(/[\w.@$-]+/g) ?? []);
+// Also the last segment of every path-like string, because Node resolves require('../lib/payload')
+// to payload.js, payload.json or payload.node, and require('./lib') to lib/index.js.
+export function codeRefs(text = '') {
+  const refs = { tokens: new Set(), tails: new Set() };
+  addRefs(refs, text);
+  return refs;
+}
+function addRefs(refs, text) {
+  for (const t of text.match(/[\w.@$-]+/g) ?? []) refs.tokens.add(t);
+  for (const m of text.matchAll(/[\w.@$-]*\/([\w.@$-]+)/g)) refs.tails.add(m[1]);
+}
+const NODE_RESOLVED = /\.(js|json|node)$/i;
+// Does code with these refs name file p, with or without the extension Node would add?
+export function refersTo(refs, p) {
+  const parts = p.split('/');
+  const base = parts.at(-1);
+  if (refs.tokens.has(base)) return true;
+  if (!NODE_RESOLVED.test(base)) return false;
+  const stem = base.replace(NODE_RESOLVED, '');
+  return refs.tails.has(stem) || (stem === 'index' && parts.length > 1 && refs.tails.has(parts.at(-2)));
+}
 
 // Which files of a package can run. Paths follow npm's extraction: the first path component of
 // each entry is stripped (so mixed root folders land in one tree), leading slashes are dropped,
@@ -322,10 +349,21 @@ export function classifyPackageFiles(files) {
   const names = [...byName.keys()].filter(f => f !== 'package.json');
   const nestedSet = new Set(nested);
   const direct = new Set(names.filter(f => entries.has(f) || nestedSet.has(f) || !isOptional(f)));
-  const tokens = codeTokens([...direct].map(f => byName.get(f).toString('utf8')).join('\n'));
-  const referenced = f => !INERT_ASSET.test(f) && tokens.has(f.split('/').pop());
+  // Follow references until nothing new is added: a test helper that index.js loads can load
+  // another file in turn, and each one it reaches runs too.
+  const refs = codeRefs([...direct].map(f => byName.get(f).toString('utf8')).join('\n'));
+  const reached = new Set();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const f of names) {
+      if (direct.has(f) || reached.has(f) || INERT_ASSET.test(f) || !refersTo(refs, f)) continue;
+      reached.add(f);
+      addRefs(refs, byName.get(f).toString('utf8'));
+      grew = true;
+    }
+  }
   // Entry points first, then the rest of the code, then optional files the code refers to.
-  const code = [...new Set([...entries, ...direct, ...names.filter(f => !direct.has(f) && referenced(f))])];
+  const code = [...new Set([...entries, ...direct, ...reached])];
   return { byName, pkgText, entries, missing, code, codeSet: new Set(code) };
 }
 
@@ -362,7 +400,10 @@ export function splitGitDiff(text) {
       path: m[2],
       text: part.replace(/\n$/, ''),
       deleted: /^(deleted file mode|\+\+\+ \/dev\/null)/m.test(part),
-      binary: /^(Binary files .* differ|GIT binary patch)$/m.test(part),
+      // npm diff prints only the header for files it considers binary (.node, .wasm, ...), with
+      // no marker, so any content change without a hunk can't be reviewed either.
+      binary: /^(Binary files .* differ|GIT binary patch)$/m.test(part) || BINARY_EXT.test(m[2])
+        || (!/^@@ /m.test(part) && !/^(deleted file mode|\+\+\+ \/dev\/null)/m.test(part) && !/^(old|new) mode /m.test(part)),
     });
   }
   return chunks;
@@ -424,11 +465,12 @@ export function newPackageSource(name, version) {
 
 // The npm diff of an updated package, fitted so every changed file that runs is shown in full.
 // Which files run comes from the new version's own tarball; if that can't be read cleanly,
-// every changed file except images, fonts and media counts.
+// every changed file except images, fonts and media counts. Changed data files always count:
+// unchanged code can load them by a name built at runtime, which no reference check can see.
 export function reviewNpmDiff(diff, newFiles, budget = LIMITS.perPackageCode) {
   const cls = newFiles && !newFiles.unsupported.length ? classifyPackageFiles(newFiles.files) : null;
   const required = cls
-    ? p => cls.codeSet.has(p) || p === 'package.json' || p.endsWith('/package.json')
+    ? p => cls.codeSet.has(p) || p === 'package.json' || p.endsWith('/package.json') || !skippableInDiff(p)
     : p => !INERT_ASSET.test(p);
   return { ...fitDiff(splitGitDiff(diff), { required, budget }), classified: Boolean(cls) };
 }
@@ -554,7 +596,9 @@ function diffBuffers(oldBuf, newBuf, path) {
 // - node actions: action.yml plus the folder the runtime entry files live in (usually dist/).
 //   GitHub's compare omits the patch for big bundles, so those files are diffed here from both
 //   refs. Source, tests and the action repo's own workflows don't run and are context only.
-// - composite actions: action.yml and every file that isn't docs, data or tests.
+// - composite actions: action.yml and every file that isn't docs or data (run: steps can run tests).
+// Files the runtime code names, with or without the extension Node adds, are required too, and
+// a change to what action.yml runs (entry file or action type) is never complete.
 // - docker and anything else: the image can't be reviewed, so it's never complete.
 // Returns { text, complete }, or null for a newly introduced action (flagged separately).
 export async function reviewAction(c, budget = LIMITS.perActionCode) {
@@ -583,6 +627,21 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   const entryDirs = [...new Set(entries.map(e => posix.dirname(e)))];
   if (yml && !node && using !== 'composite') { complete = false; notes.push(`"${runs.using ?? 'unknown'}" action${runs.image ? ` (image ${runs.image})` : ''}: what runs can't be reviewed`); }
 
+  // If action.yml now runs something else (another entry file, or a different kind of action),
+  // the newly selected code may be unchanged and so absent from the compare: never reviewed.
+  if (yml) {
+    let oldRuns = null;
+    try {
+      const old = (await ghFile(owner, repo, ymls[0], c.from.ref)) ?? (await ghFile(owner, repo, ymls[1], c.from.ref));
+      if (old) oldRuns = parseActionRuns(old.toString('utf8'));
+    } catch { /* treated as changed below */ }
+    const what = r => JSON.stringify([(r?.using ?? '').toLowerCase(), r?.main ?? null, r?.pre ?? null, r?.post ?? null, r?.image ?? null]);
+    if (what(oldRuns) !== what(runs)) {
+      complete = false;
+      notes.push(`what the action runs changed (${oldRuns ? `${oldRuns.using ?? '?'} ${oldRuns.main ?? oldRuns.image ?? ''}`.trim() : 'old action.yml unreadable'} → ${`${runs.using ?? '?'} ${runs.main ?? runs.image ?? ''}`.trim()}), so the newly selected code was not reviewed`);
+    }
+  }
+
   // Names the runtime code refers to, so docs or data it loads count as code.
   let refText = yml?.toString('utf8') ?? '';
   for (const e of entries) {
@@ -592,10 +651,12 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
       else { complete = false; notes.push(`entry file ${e} not found at the new ref`); }
     } catch (err) { complete = false; notes.push(`could not read ${e}: ${err.message}`); }
   }
-  const tokens = codeTokens(refText);
-  const referenced = p => !INERT_ASSET.test(p) && tokens.has(p.split('/').pop());
+  const refs = codeRefs(refText);
+  const referenced = p => !INERT_ASSET.test(p) && refersTo(refs, p);
   const repoMeta = p => p.startsWith('.github/') && !ymls.includes(p);
-  const optional = p => isOptional(p) || repoMeta(p);
+  // A composite action's run: steps can execute anything in the repo, tests included, so only
+  // docs and data are optional there; for node actions tests never run unless referenced.
+  const optional = p => (node ? isOptional(p) : isNonCode(p)) || repoMeta(p);
   const runsFrom = p => entryDirs.some(d => (d === '.' && !sub.length) || p === d || p.startsWith(`${d}/`));
   const required = p => ymls.includes(p) || entries.includes(p) || referenced(p)
     || (node ? runsFrom(p) && !optional(p) : !optional(p));
