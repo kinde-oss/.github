@@ -278,7 +278,9 @@ const BINARY_EXT = /\.(node|wasm|exe|dll|so|dylib|bin|o|a|lib|jar|class|pyc|zip|
 // source maps, styles, markup, assets and tests. Data files (JSON, YAML, text, ...) are never
 // skipped, because unchanged code can load them by a name built at runtime.
 const DIFF_SKIPPABLE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|d\.[cm]?ts|map|css|scss|less|html?|svg)$/i;
-const skippableInDiff = p => (DIFF_SKIPPABLE.test(p) && !(CODE_EXT.test(p) && !/\.d\.[cm]?ts$/i.test(p))) || INERT_ASSET.test(p) || TEST_PATH.test(p);
+const DATA_EXT = /\.(json|ya?ml|toml|ini|txt|csv|xml|conf|cfg|properties|env)$/i;
+const skippableInDiff = p => !DATA_EXT.test(p)
+  && ((DIFF_SKIPPABLE.test(p) && !(CODE_EXT.test(p) && !/\.d\.[cm]?ts$/i.test(p))) || INERT_ASSET.test(p) || TEST_PATH.test(p));
 
 // Every name-like token in some code, so "does the code mention notes.md" is a set lookup.
 // Also the last segment of every path-like string, because Node resolves require('../lib/payload')
@@ -338,15 +340,27 @@ export function classifyPackageFiles(files) {
     try { json = JSON.parse(byName.get(f).toString('utf8')); } catch { /* shown raw as code */ }
     return [posix.dirname(f), json];
   })];
-  const declared = manifests.flatMap(([dir, p]) => [...leaves(p?.exports), p?.main, p?.module, typeof p?.browser === 'string' ? p.browser : null, ...leaves(p?.bin)]
-    // Skip wildcard and folder ("./dir/") subpath patterns, and an empty main (types-only packages).
-    .filter(t => typeof t === 'string' && t.trim() !== '' && !t.includes('*') && !t.endsWith('/'))
-    .map(t => posix.normalize(posix.join(dir, t.replace(/^\.?\//, '') || '.')))
+  const targets = ([dir, p]) => [...leaves(p?.exports), p?.main, p?.module, typeof p?.browser === 'string' ? p.browser : null, ...leaves(p?.bin)]
+    .filter(t => typeof t === 'string' && t.trim() !== '') // an empty main means a types-only package
+    .map(t => ({ dir, t }));
+  const allTargets = manifests.flatMap(targets);
+  const pattern = ({ t }) => t.includes('*') || t.endsWith('/');
+  const declared = allTargets.filter(x => !pattern(x))
+    .map(({ dir, t }) => posix.normalize(posix.join(dir, t.replace(/^\.?\//, '') || '.')))
     .map(t => (t === '.' ? 'index' : t))
-    .filter(t => t !== '..' && !t.startsWith('../')));
+    .filter(t => t !== '..' && !t.startsWith('../'));
   const missing = [...new Set(declared.filter(p => !resolve(p)))];
-  const entries = new Set([...declared, 'index.js'].map(resolve).filter(Boolean));
   const names = [...byName.keys()].filter(f => f !== 'package.json');
+  // Subpath patterns ("./*": "./tests/*.js") and folder mappings ("./lib/": "./lib/") make every
+  // file they match importable, so each match is an entry point. A pattern that matches nothing
+  // isn't an error: it just exposes no files.
+  const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patterns = allTargets.filter(pattern).map(({ dir, t }) => {
+    const p = posix.join(dir, t.replace(/^\.?\//, ''));
+    return new RegExp(`^${p.split('*').map(escapeRe).join('.+')}${p.endsWith('/') ? '.+' : ''}$`);
+  });
+  const patterned = names.filter(f => !INERT_ASSET.test(f) && patterns.some(re => re.test(f)));
+  const entries = new Set([...[...declared, 'index.js'].map(resolve).filter(Boolean), ...patterned]);
   const nestedSet = new Set(nested);
   const direct = new Set(names.filter(f => entries.has(f) || nestedSet.has(f) || !isOptional(f)));
   // Follow references until nothing new is added: a test helper that index.js loads can load
@@ -653,13 +667,19 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   }
   const refs = codeRefs(refText);
   const referenced = p => !INERT_ASSET.test(p) && refersTo(refs, p);
-  const repoMeta = p => p.startsWith('.github/') && !ymls.includes(p);
+  // The action repo's own CI never runs for users; a composite action's run: steps can still
+  // execute scripts kept under .github/, so for those only .github/workflows/ is excluded.
+  const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : p.startsWith('.github/workflows/'));
   // A composite action's run: steps can execute anything in the repo, tests included, so only
   // docs and data are optional there; for node actions tests never run unless referenced.
   const optional = p => (node ? isOptional(p) : isNonCode(p)) || repoMeta(p);
   const runsFrom = p => entryDirs.some(d => (d === '.' && !sub.length) || p === d || p.startsWith(`${d}/`));
+  // Node can load any JavaScript-family file the bundle reaches, including through unchanged
+  // files this review never reads, so every changed one outside tests and repo metadata counts.
+  // (TypeScript source, JSON and the like still count only when referenced or in the bundle folder.)
+  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !optional(p);
   const required = p => ymls.includes(p) || entries.includes(p) || referenced(p)
-    || (node ? runsFrom(p) && !optional(p) : !optional(p));
+    || (node ? (runsFrom(p) && !optional(p)) || runnableJs(p) : !optional(p));
   const context = p => !optional(p);
 
   // Build chunks; files that run but have no patch are diffed here, until the budget is spent.

