@@ -670,8 +670,8 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   const refs = codeRefs(refText);
   const referenced = p => !INERT_ASSET.test(p) && refersTo(refs, p);
   // The action repo's own CI never runs for users; a composite action's run: steps can still
-  // execute scripts kept under .github/, so for those only .github/workflows/ is excluded.
-  const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : p.startsWith('.github/workflows/'));
+  // execute files kept under .github/, so for those only the workflow YAML itself is excluded.
+  const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(p));
   // A composite action's run: steps can execute anything in the repo, tests included, so only
   // docs and data are optional there; for node actions tests never run unless referenced.
   const optional = p => (node ? isOptional(p) : isNonCode(p)) || repoMeta(p);
@@ -679,10 +679,14 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   // Node can load any JavaScript-family file the runtime code reaches, including through unchanged
   // files this review never reads, so every changed one counts, wherever it is (test folders and
   // .github/ included), for node and composite actions alike.
-  // Known limit: an action's data files (JSON, YAML, ...) count only when the runtime code names
-  // them or they sit in the bundle folder. Requiring them all would put package-lock.json and the
-  // repo's workflow YAML into nearly every action update.
-  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !isNonCode(p);
+  // Shell and other script files count the same way: a run: step or the bundle can execute one
+  // that sources or imports another without either being named.
+  // Known limit: an action's data files (JSON, YAML, ...) count only when action.yml or an entry
+  // file names them, or they sit in the bundle folder. References inside other files aren't read,
+  // so one loaded through an unchanged file, by a literal or a built name, isn't reviewed.
+  // Requiring every data file would put package-lock.json and the repo's workflow YAML into nearly
+  // every action update.
+  const runnableJs = p => /\.([cm]?js|node|wasm|sh|bash|zsh|ps1|psm1|py|rb|pl|cmd|bat)$/i.test(p) && !isNonCode(p);
   const required = p => ymls.includes(p) || entries.includes(p) || referenced(p) || runnableJs(p)
     || (node ? runsFrom(p) && !optional(p) : !optional(p));
   const context = p => !optional(p);

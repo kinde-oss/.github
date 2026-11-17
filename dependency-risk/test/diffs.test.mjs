@@ -334,3 +334,27 @@ test('known limit: an action data file reached only through an unchanged file is
   });
   assert.equal((await reviewAction(change, 100)).complete, true, 'documented in the README; requiring all data would block nearly every action update');
 });
+
+test('a composite action requires shell helpers under .github/workflows/, but not the workflow YAML', async () => {
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: bash .github/workflows/install.sh\n      shell: bash\n';
+  mockGitHub({
+    // install.sh sources helper.sh, which action.yml never names.
+    compare: compareFiles(
+      { filename: '.github/workflows/helper.sh', status: 'modified', patch: `@@\n+${'S'.repeat(500)}` },
+      { filename: '.github/workflows/ci.yml', status: 'modified', patch: `@@\n+${'W'.repeat(500)}` },
+    ),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'the sourced helper is required');
+  const r = await reviewAction(change, 1e6);
+  assert.ok(r.text.includes('SSSS'));
+  assert.match(r.text, /not run when the package is used: \.github\/workflows\/ci\.yml/);
+});
+
+test('a node action requires changed scripts anywhere, since the bundle can execute them', async () => {
+  mockGitHub({
+    compare: compareFiles({ filename: 'scripts/post.sh', status: 'modified', patch: `@@\n+${'X'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'x' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false);
+});
