@@ -51,10 +51,10 @@ test('classifyPackageFiles: tests and docs are code only when code refers to the
 });
 
 test('reviewNpmDiff only budgets code that runs in the new version', () => {
-  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': 'x', 'README.md': 'docs', 'test/a.test.js': 't' }), unsupported: [] };
-  const diff = [fileDiff('index.js', '+CODE()'), fileDiff('README.md', `+${'d'.repeat(5000)}`), fileDiff('test/a.test.js', `+${'t'.repeat(5000)}`), fileDiff('package.json', '+"version": "2"')].join('\n');
+  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': 'x', 'README.md': 'docs', 'index.d.ts': 't' }), unsupported: [] };
+  const diff = [fileDiff('index.js', '+CODE()'), fileDiff('README.md', `+${'d'.repeat(5000)}`), fileDiff('index.d.ts', `+${'t'.repeat(5000)}`), fileDiff('package.json', '+"version": "2"')].join('\n');
   let r = reviewNpmDiff(diff, newFiles, 500);
-  assert.equal(r.complete, true, 'big doc and test changes do not use the budget');
+  assert.equal(r.complete, true, 'big doc and type-declaration changes do not use the budget');
   assert.ok(r.text.includes('+CODE()') && r.text.includes('"version": "2"'));
   r = reviewNpmDiff(diff, null, 500);
   assert.equal(r.complete, false, 'without the tarball every text file counts, so this no longer fits');
@@ -259,11 +259,11 @@ test('reviewAction requires changed JavaScript reached through an unchanged file
   assert.ok(r.complete && r.text.includes('PPPP'));
 });
 
-test('reviewAction keeps TypeScript source and repo metadata of node actions as context only', async () => {
+test('reviewAction keeps TypeScript source, TS tests and workflow YAML of node actions as context only', async () => {
   mockGitHub({
     compare: compareFiles(
       { filename: 'src/main.ts', status: 'modified', patch: `@@\n+${'S'.repeat(500)}` },
-      { filename: '.github/scripts/release.js', status: 'modified', patch: `@@\n+${'R'.repeat(500)}` },
+      { filename: '.github/workflows/ci.yml', status: 'modified', patch: `@@\n+${'R'.repeat(500)}` },
       { filename: '__tests__/a.test.ts', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` },
     ),
     contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'x' },
@@ -301,4 +301,36 @@ test('a sourceMappingURL comment does not make the source map required, but a re
   assert.equal((await reviewAction(change, 100)).complete, true);
   mockGitHub({ compare: compareFiles(map), contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('./index.js.map')" } });
   assert.equal((await reviewAction(change, 100)).complete, false);
+});
+
+// ---- follow-ups: any file type in npm diffs, JavaScript anywhere in actions ----
+test('reviewNpmDiff requires every changed file except docs, types, maps, styles, markup and assets', () => {
+  const newFiles = { files: files({ 'package.json': '{"main":"index.js"}', 'index.js': 'x', 'test/build.dat': 'd', 'LICENSE.txt': 'MIT', 'README.json': '{}' }), unsupported: [] };
+  const diff = [fileDiff('test/build.dat', '+EVIL_DAT'), fileDiff('README.json', '+EVIL_JSON'), fileDiff('LICENSE.txt', '+MIT'), fileDiff('logo.png', '+png')].join('\n');
+  const r = reviewNpmDiff(diff, newFiles, 1e6);
+  assert.ok(r.text.includes('EVIL_DAT') && r.text.includes('EVIL_JSON'), 'unknown data formats and doc-named data files are required');
+  assert.ok(!r.text.includes('+MIT'), 'a licence text file is still docs');
+  assert.equal(reviewNpmDiff(diff, newFiles, 20).complete, false);
+});
+
+test('reviewAction requires changed JavaScript under .github/, for node and composite actions', async () => {
+  mockGitHub({
+    compare: compareFiles({ filename: '.github/scripts/payload.js', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader.js')" },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'node: reached through an unchanged loader');
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: node .github/workflows/install.js\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: '.github/workflows/helper.js', status: 'modified', patch: `@@\n+${'H'.repeat(500)}` }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'composite: a helper the run: script loads');
+});
+
+test('known limit: an action data file reached only through an unchanged file is context, not required', async () => {
+  mockGitHub({
+    compare: compareFiles({ filename: 'data/payload.json', status: 'modified', patch: `@@\n+${'D'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader.js')" },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, true, 'documented in the README; requiring all data would block nearly every action update');
 });

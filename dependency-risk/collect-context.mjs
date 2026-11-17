@@ -274,13 +274,12 @@ const isOptional = f => isNonCode(f) || TEST_PATH.test(f);
 const INERT_ASSET = /\.(png|jpe?g|gif|ico|webp|avif|bmp|ttf|otf|woff2?|eot|mp3|mp4|wav|webm)$/i;
 // Compiled or archived files a text diff can't show.
 const BINARY_EXT = /\.(node|wasm|exe|dll|so|dylib|bin|o|a|lib|jar|class|pyc|zip|gz|tgz|tar|7z)$/i;
-// Changed files an npm diff review may skip unless code refers to them: docs, type declarations,
-// source maps, styles, markup, assets and tests. Data files (JSON, YAML, text, ...) are never
-// skipped, because unchanged code can load them by a name built at runtime.
-const DIFF_SKIPPABLE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)([.-][^/]*)?$|\.(md|markdown|d\.[cm]?ts|map|css|scss|less|html?|svg)$/i;
-const DATA_EXT = /\.(json|ya?ml|toml|ini|txt|csv|xml|conf|cfg|properties|env)$/i;
-const skippableInDiff = p => !DATA_EXT.test(p)
-  && ((DIFF_SKIPPABLE.test(p) && !(CODE_EXT.test(p) && !/\.d\.[cm]?ts$/i.test(p))) || INERT_ASSET.test(p) || TEST_PATH.test(p));
+// The only changed files an npm diff review may skip unless code refers to them: docs (by
+// extension, or a doc name with no extension or a doc one), type declarations, source maps,
+// styles, markup and binary assets. Everything else counts, whatever folder it's in, because
+// unchanged code can load any file by a name built at runtime (test/build.dat, data/x.json, ...).
+const DIFF_SKIPPABLE = /(^|\/)(readme|licen[cs]e|copying|changelog|history|authors|contributors|notice)(\.(md|markdown|rst|adoc|txt))?$|\.(md|markdown|rst|adoc|d\.[cm]?ts|map|css|scss|less|html?|svg)$/i;
+const skippableInDiff = p => DIFF_SKIPPABLE.test(p) || INERT_ASSET.test(p);
 
 // Every name-like token in some code, so "does the code mention notes.md" is a set lookup.
 // Also the last segment of every path-like string, because Node resolves require('../lib/payload')
@@ -677,13 +676,15 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   // docs and data are optional there; for node actions tests never run unless referenced.
   const optional = p => (node ? isOptional(p) : isNonCode(p)) || repoMeta(p);
   const runsFrom = p => entryDirs.some(d => (d === '.' && !sub.length) || p === d || p.startsWith(`${d}/`));
-  // Node can load any JavaScript-family file the bundle reaches, including through unchanged
-  // files this review never reads, so every changed one counts, test folders included; only the
-  // repo's own .github/ metadata is left out. (TypeScript source, JSON and the like still count
-  // only when referenced or in the bundle folder.)
-  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !repoMeta(p) && !isNonCode(p);
-  const required = p => ymls.includes(p) || entries.includes(p) || referenced(p)
-    || (node ? (runsFrom(p) && !optional(p)) || runnableJs(p) : !optional(p));
+  // Node can load any JavaScript-family file the runtime code reaches, including through unchanged
+  // files this review never reads, so every changed one counts, wherever it is (test folders and
+  // .github/ included), for node and composite actions alike.
+  // Known limit: an action's data files (JSON, YAML, ...) count only when the runtime code names
+  // them or they sit in the bundle folder. Requiring them all would put package-lock.json and the
+  // repo's workflow YAML into nearly every action update.
+  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !isNonCode(p);
+  const required = p => ymls.includes(p) || entries.includes(p) || referenced(p) || runnableJs(p)
+    || (node ? runsFrom(p) && !optional(p) : !optional(p));
   const context = p => !optional(p);
 
   // Build chunks; files that run but have no patch are diffed here, until the budget is spent.
