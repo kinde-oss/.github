@@ -304,7 +304,23 @@ export function refersTo(refs, p) {
   if (refs.tokens.has(base)) return true;
   if (!NODE_RESOLVED.test(base)) return false;
   const stem = base.replace(NODE_RESOLVED, '');
-  return refs.tails.has(stem) || (stem === 'index' && parts.length > 1 && refs.tails.has(parts.at(-2)));
+  // require('./lib/loader') also reads lib/loader/package.json, whose main says what runs.
+  const folderEntry = (stem === 'index' || base === 'package.json') && parts.length > 1 && refs.tails.has(parts.at(-2));
+  return refs.tails.has(stem) || folderEntry;
+}
+
+// The entry points a package.json declares, as relative paths ("./x"), so that reading one adds
+// them as path references: an extensionless "main": "payload" then resolves like require('./payload').
+export function manifestTargets(text) {
+  let pkg;
+  try { pkg = JSON.parse(text); } catch { return ''; }
+  const leaves = e => typeof e === 'string' ? [e]
+    : Array.isArray(e) ? e.flatMap(leaves)
+    : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
+  return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...leaves(pkg?.exports), ...leaves(pkg?.bin)]
+    .filter(t => typeof t === 'string' && t.trim())
+    .map(t => (t.startsWith('.') || t.startsWith('/') ? t : `./${t}`))
+    .join('\n');
 }
 
 // Which files of a package can run. Paths follow npm's extraction: the first path component of
@@ -698,12 +714,17 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
     }
     reads += toRead.length;
     for (let i = 0; i < toRead.length; i += 10) { // ten reads at a time
-      const bodies = await Promise.all(toRead.slice(i, i + 10).map(p => ghFile(owner, repo, p, c.to.ref).catch(err => {
+      const batch = toRead.slice(i, i + 10);
+      const bodies = await Promise.all(batch.map(p => ghFile(owner, repo, p, c.to.ref).catch(err => {
         complete = false;
         notes.push(`could not read ${p} to follow its references: ${err.message}`);
         return null;
       })));
-      for (const body of bodies) if (body && !body.includes(0)) addRefs(refs, body.toString('utf8'));
+      bodies.forEach((body, k) => {
+        if (!body || body.includes(0)) return;
+        const text = body.toString('utf8');
+        addRefs(refs, batch[k].endsWith('package.json') ? `${text}\n${manifestTargets(text)}` : text);
+      });
     }
   }
   if (capped) { complete = false; notes.push(`the runtime code reaches more than ${MAX_REF_FETCHES} files, so not every reference was followed`); }

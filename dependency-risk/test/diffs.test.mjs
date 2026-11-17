@@ -404,3 +404,18 @@ test('a node action requires changed scripts anywhere, since the bundle can exec
   });
   assert.equal((await reviewAction(change, 100)).complete, false);
 });
+
+test('reviewAction follows a folder require through its unchanged package.json', async () => {
+  // dist/index.js -> require('../lib/loader') -> lib/loader/package.json (unchanged) -> main
+  const base = { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader')" };
+  mockGitHub({
+    compare: compareFiles({ filename: '.github/scripts/payload.txt', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { ...base, 'lib/loader/package.json@v2': '{"main": "../../.github/scripts/payload.txt"}' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'a main with an unusual extension is reached');
+  mockGitHub({
+    compare: compareFiles({ filename: 'lib/loader/payload.dat', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { ...base, 'lib/loader/package.json@v2': '{"main": "payload.dat"}' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'a bare main without "./" is reached too');
+});
