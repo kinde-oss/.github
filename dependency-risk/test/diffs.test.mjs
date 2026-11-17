@@ -74,10 +74,18 @@ test('parseActionRuns reads the runs: block', () => {
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
 
-function mockGitHub({ compare, contents }) {
+// The repo at each ref is the `contents` keys for that ref plus the compare's changed files.
+function mockGitHub({ compare, contents, tree = 'ok' }) {
   globalThis.fetch = async url => {
     const u = new URL(url);
     if (u.pathname.includes('/compare/')) return compare === null ? new Response('{}', { status: 404 }) : Response.json(compare);
+    const t = u.pathname.match(/\/git\/trees\/(.+)$/);
+    if (t) {
+      if (tree === 'fail') return new Response('{}', { status: 500 });
+      const ref = decodeURIComponent(t[1]);
+      const paths = new Set([...Object.keys(contents).filter(k => k.endsWith(`@${ref}`)).map(k => k.slice(0, k.lastIndexOf('@'))), ...(compare?.files ?? []).filter(f => f.status !== 'removed').map(f => f.filename)]);
+      return Response.json({ tree: [...paths].map(path => ({ path, type: 'blob' })), truncated: tree === 'truncated' });
+    }
     const m = u.pathname.match(/\/contents\/(.+)$/);
     const body = m && contents[`${decodeURIComponent(m[1])}@${u.searchParams.get('ref')}`];
     return body == null ? new Response('', { status: 404 }) : new Response(body);
@@ -327,12 +335,50 @@ test('reviewAction requires changed JavaScript under .github/, for node and comp
   assert.equal((await reviewAction(change, 100)).complete, false, 'composite: a helper the run: script loads');
 });
 
-test('known limit: an action data file reached only through an unchanged file is context, not required', async () => {
+test('known limit: an action data file loaded through an unchanged file by a built name is context', async () => {
   mockGitHub({
     compare: compareFiles({ filename: 'data/payload.json', status: 'modified', patch: `@@\n+${'D'.repeat(500)}` }),
-    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader.js')" },
+    contents: {
+      'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML,
+      'dist/index.js@v2': "require('../lib/loader.js')",
+      'lib/loader.js@v2': "require('../' + dir + '/' + name + '.json')",
+    },
   });
   assert.equal((await reviewAction(change, 100)).complete, true, 'documented in the README; requiring all data would block nearly every action update');
+});
+
+test('reviewAction follows literal references through unchanged files, whatever the extension', async () => {
+  // dist/index.js -> lib/loader.js (unchanged) -> .github/scripts/payload.txt (changed, run as CommonJS)
+  const contents = {
+    'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML,
+    'dist/index.js@v2': "require('../lib/loader.js')",
+    'lib/loader.js@v2': "require('../.github/scripts/payload.txt')",
+  };
+  mockGitHub({ compare: compareFiles({ filename: '.github/scripts/payload.txt', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` }), contents });
+  const r = await reviewAction(change, 100);
+  assert.equal(r.complete, false, 'the payload is reached, so it is required');
+  assert.match(r.text, /referenced files followed: 2/, 'loader.js and payload.txt were read');
+
+  contents['lib/loader.js@v2'] = "module.exports = require('../data/payload.json')";
+  mockGitHub({ compare: compareFiles({ filename: 'data/payload.json', status: 'modified', patch: `@@\n+${'D'.repeat(500)}` }), contents });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'a data file named literally in an unchanged loader is required');
+});
+
+test('reviewAction fails closed when it cannot follow references', async () => {
+  const base = { compare: compareFiles({ filename: 'README.md', status: 'modified', patch: '@@\n+docs' }), contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'x' } };
+  mockGitHub({ ...base, tree: 'fail' });
+  assert.match((await reviewAction(change)).text, /could not list the repository's files/);
+  mockGitHub({ ...base, tree: 'fail' });
+  assert.equal((await reviewAction(change)).complete, false);
+  mockGitHub({ ...base, tree: 'truncated' });
+  assert.equal((await reviewAction(change)).complete, false);
+
+  // An entry that names more files than the read limit.
+  const many = Object.fromEntries(Array.from({ length: 401 }, (_, i) => [`lib/f${i}.js@v2`, 'x']));
+  mockGitHub({ compare: base.compare, contents: { ...base.contents, ...many, 'dist/index.js@v2': Array.from({ length: 401 }, (_, i) => `require('../lib/f${i}.js')`).join('\n') } });
+  const r = await reviewAction(change);
+  assert.equal(r.complete, false);
+  assert.match(r.text, /reaches more than 400 files/);
 });
 
 test('a composite action requires shell helpers under .github/workflows/, but not the workflow YAML', async () => {

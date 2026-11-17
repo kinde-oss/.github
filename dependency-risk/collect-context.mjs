@@ -608,6 +608,10 @@ function diffBuffers(oldBuf, newBuf, path) {
   }
 }
 
+// How many files the action review reads to follow references through code it doesn't otherwise
+// fetch. Bundled actions reach a handful; unbundled ones like github/codeql-action reach a few hundred.
+const MAX_REF_FETCHES = 400;
+
 // Reviews one action ref change. What runs must be shown in full:
 // - node actions: action.yml plus the folder the runtime entry files live in (usually dist/).
 //   GitHub's compare omits the patch for big bundles, so those files are diffed here from both
@@ -668,7 +672,42 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
     } catch (err) { complete = false; notes.push(`could not read ${e}: ${err.message}`); }
   }
   const refs = codeRefs(refText);
-  const referenced = p => !INERT_ASSET.test(p) && refersTo(refs, p);
+
+  // Follow literal references through the files they reach, changed or not: an unchanged
+  // lib/loader.js can load a changed payload of any extension (CommonJS runs unknown ones as
+  // JavaScript). The repo's file list at the new ref says what exists; each file reached is read
+  // for its own references, up to MAX_REF_FETCHES reads, beyond which the review is incomplete.
+  const reached = new Set();
+  let tree = [];
+  try {
+    const t = await ghJson(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(c.to.ref)}?recursive=1`);
+    tree = (t.tree ?? []).filter(e => e.type === 'blob').map(e => e.path);
+    if (t.truncated) { complete = false; notes.push('the repository file list was truncated, so references could not all be followed'); }
+  } catch (err) { complete = false; notes.push(`could not list the repository's files: ${err.message}`); }
+  const alreadyRead = new Set([...ymls, ...entries]);
+  let reads = 0, capped = false;
+  for (let grew = true; grew;) {
+    grew = false;
+    const toRead = [];
+    for (const p of tree.filter(x => !reached.has(x) && !INERT_ASSET.test(x) && refersTo(refs, x))) {
+      reached.add(p);
+      grew = true;
+      if (alreadyRead.has(p) || BINARY_EXT.test(p)) continue;
+      if (reads + toRead.length >= MAX_REF_FETCHES) { capped = true; continue; }
+      toRead.push(p);
+    }
+    reads += toRead.length;
+    for (let i = 0; i < toRead.length; i += 10) { // ten reads at a time
+      const bodies = await Promise.all(toRead.slice(i, i + 10).map(p => ghFile(owner, repo, p, c.to.ref).catch(err => {
+        complete = false;
+        notes.push(`could not read ${p} to follow its references: ${err.message}`);
+        return null;
+      })));
+      for (const body of bodies) if (body && !body.includes(0)) addRefs(refs, body.toString('utf8'));
+    }
+  }
+  if (capped) { complete = false; notes.push(`the runtime code reaches more than ${MAX_REF_FETCHES} files, so not every reference was followed`); }
+  const referenced = p => reached.has(p) || (!INERT_ASSET.test(p) && refersTo(refs, p));
   // The action repo's own CI never runs for users; a composite action's run: steps can still
   // execute files kept under .github/, so for those only the workflow YAML itself is excluded.
   const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(p));
@@ -681,11 +720,10 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   // .github/ included), for node and composite actions alike.
   // Shell and other script files count the same way: a run: step or the bundle can execute one
   // that sources or imports another without either being named.
-  // Known limit: an action's data files (JSON, YAML, ...) count only when action.yml or an entry
-  // file names them, or they sit in the bundle folder. References inside other files aren't read,
-  // so one loaded through an unchanged file, by a literal or a built name, isn't reviewed.
-  // Requiring every data file would put package-lock.json and the repo's workflow YAML into nearly
-  // every action update.
+  // Known limit: an action's data files (JSON, YAML, ...) count only when the code reached from
+  // action.yml names them literally (references are followed through unchanged files), or they sit
+  // in the bundle folder. One loaded by a name built at runtime isn't reviewed. Requiring every data
+  // file would put package-lock.json and the repo's workflow YAML into nearly every action update.
   const runnableJs = p => /\.([cm]?js|node|wasm|sh|bash|zsh|ps1|psm1|py|rb|pl|cmd|bat)$/i.test(p) && !isNonCode(p);
   const required = p => ymls.includes(p) || entries.includes(p) || referenced(p) || runnableJs(p)
     || (node ? runsFrom(p) && !optional(p) : !optional(p));
@@ -713,7 +751,7 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
     chunks.push(chunk);
   }
   const fitted = fitDiff(chunks, { required, context, budget });
-  const head = `using: ${runs.using ?? '?'}${entries.length ? `, runs ${entries.join(', ')}` : ''}; commits: ${j.total_commits}, files changed: ${files.length}\n`;
+  const head = `using: ${runs.using ?? '?'}${entries.length ? `, runs ${entries.join(', ')}` : ''}; referenced files followed: ${reads}; commits: ${j.total_commits}, files changed: ${files.length}\n`;
   return {
     text: head + (notes.length ? `(${notes.join('; ')})\n` : '') + fitted.text,
     complete: complete && fitted.complete,
