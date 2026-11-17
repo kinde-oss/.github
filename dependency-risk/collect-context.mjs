@@ -291,6 +291,9 @@ export function codeRefs(text = '') {
   return refs;
 }
 function addRefs(refs, text) {
+  // A "//# sourceMappingURL=index.js.map" comment points tools at a source map; it doesn't load
+  // it, and counting it would pull every bundle's (huge) map diff into the required code.
+  text = text.replace(/^[ \t]*\/\/[#@][ \t]*sourceMappingURL=.*$/gm, '');
   for (const t of text.match(/[\w.@$-]+/g) ?? []) refs.tokens.add(t);
   for (const m of text.matchAll(/[\w.@$-]*\/([\w.@$-]+)/g)) refs.tails.add(m[1]);
 }
@@ -675,9 +678,10 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   const optional = p => (node ? isOptional(p) : isNonCode(p)) || repoMeta(p);
   const runsFrom = p => entryDirs.some(d => (d === '.' && !sub.length) || p === d || p.startsWith(`${d}/`));
   // Node can load any JavaScript-family file the bundle reaches, including through unchanged
-  // files this review never reads, so every changed one outside tests and repo metadata counts.
-  // (TypeScript source, JSON and the like still count only when referenced or in the bundle folder.)
-  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !optional(p);
+  // files this review never reads, so every changed one counts, test folders included; only the
+  // repo's own .github/ metadata is left out. (TypeScript source, JSON and the like still count
+  // only when referenced or in the bundle folder.)
+  const runnableJs = p => /\.([cm]?js|node|wasm)$/i.test(p) && !repoMeta(p) && !isNonCode(p);
   const required = p => ymls.includes(p) || entries.includes(p) || referenced(p)
     || (node ? (runsFrom(p) && !optional(p)) || runnableJs(p) : !optional(p));
   const context = p => !optional(p);

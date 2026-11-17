@@ -264,7 +264,7 @@ test('reviewAction keeps TypeScript source and repo metadata of node actions as 
     compare: compareFiles(
       { filename: 'src/main.ts', status: 'modified', patch: `@@\n+${'S'.repeat(500)}` },
       { filename: '.github/scripts/release.js', status: 'modified', patch: `@@\n+${'R'.repeat(500)}` },
-      { filename: '__tests__/a.test.js', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` },
+      { filename: '__tests__/a.test.ts', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` },
     ),
     contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'x' },
   });
@@ -284,4 +284,21 @@ test("reviewAction treats a composite action's .github/ scripts as code, but not
   const r = await reviewAction(change, 1e6);
   assert.ok(r.text.includes('HHHH'));
   assert.match(r.text, /not run when the package is used: \.github\/workflows\/ci\.yml/);
+});
+
+test('reviewAction requires changed JavaScript under test folders, which an unchanged file can load', async () => {
+  mockGitHub({
+    // dist/index.js -> lib/loader.js (unchanged) -> test/payload.js (changed)
+    compare: compareFiles({ filename: 'test/payload.js', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader.js')" },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false);
+});
+
+test('a sourceMappingURL comment does not make the source map required, but a real require does', async () => {
+  const map = { filename: 'dist/index.js.map', status: 'modified', patch: `@@\n+${'M'.repeat(500)}` };
+  mockGitHub({ compare: compareFiles(map), contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': 'run()\n//# sourceMappingURL=index.js.map' } });
+  assert.equal((await reviewAction(change, 100)).complete, true);
+  mockGitHub({ compare: compareFiles(map), contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('./index.js.map')" } });
+  assert.equal((await reviewAction(change, 100)).complete, false);
 });
