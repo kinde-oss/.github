@@ -392,7 +392,9 @@ export function classifyPackageFiles(files) {
   const direct = new Set(names.filter(f => entries.has(f) || nestedSet.has(f) || !isOptional(f)));
   // Follow references until nothing new is added: a test helper that index.js loads can load
   // another file in turn, and each one it reaches runs too.
-  const refs = codeRefs([...direct].map(f => byName.get(f).toString('utf8')).join('\n'));
+  // A manifest only makes Node load what its runtime fields name, so scan just those (not "types").
+  const refText = f => (nestedSet.has(f) ? manifestTargets(byName.get(f).toString('utf8')) : byName.get(f).toString('utf8'));
+  const refs = codeRefs([...direct].map(refText).join('\n'));
   const reached = new Set();
   for (let grew = true; grew;) {
     grew = false;
@@ -732,7 +734,7 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
       bodies.forEach((body, k) => {
         if (!body || body.includes(0)) return;
         const text = body.toString('utf8');
-        addRefs(refs, batch[k].endsWith('package.json') ? `${text}\n${manifestTargets(text)}` : text);
+        addRefs(refs, batch[k].endsWith('package.json') ? manifestTargets(text) : text); // only fields Node reads, not "types"
       });
     }
   }

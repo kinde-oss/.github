@@ -469,3 +469,22 @@ test('"types" conditions in imports and exports are not runtime entry points', (
   assert.ok(r.text.includes('I()'), 'the default target is still code');
   assert.equal(manifestTargets(JSON.stringify({ exports: { '.': { types: './a.d.ts', default: './a.js' } } })), './a.js');
 });
+
+test('a nested manifest\'s "types" field does not pull its declaration file into the code', async () => {
+  const r = inspectPackageFiles(files({
+    'package.json': '{"main":"index.js"}',
+    'index.js': "require('./lib')",
+    'lib/package.json': JSON.stringify({ main: 'main.js', types: './types/internal.d.ts' }),
+    'lib/main.js': 'M()',
+    'lib/types/internal.d.ts': 'x'.repeat(30_000),
+  }));
+  assert.equal(r.inspected, true, 'a large declaration file does not use the code budget');
+  assert.ok(r.text.includes('M()'), 'the nested main is still code');
+
+  // The action review reads package.json files the same way.
+  mockGitHub({
+    compare: compareFiles({ filename: 'lib/loader/types/internal.d.ts', status: 'modified', patch: `@@\n+${'T'.repeat(500)}` }),
+    contents: { 'action.yml@v1': NODE_YML, 'action.yml@v2': NODE_YML, 'dist/index.js@v2': "require('../lib/loader')", 'lib/loader/package.json@v2': JSON.stringify({ main: 'main.js', types: './types/internal.d.ts' }) },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, true, 'the .d.ts named only by "types" stays context');
+});
