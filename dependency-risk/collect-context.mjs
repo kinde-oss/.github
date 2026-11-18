@@ -39,6 +39,14 @@ const gitShow = (sha, path) => {
   try { return execFileSync('git', ['show', `${sha}:${path}`], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return ''; }
 };
 const truncate = (s, n) => (s.length > n ? s.slice(0, n) + `\n… [truncated ${s.length - n} chars]` : s);
+// package.json files may start with a UTF-8 byte-order mark, which Node accepts and JSON.parse doesn't.
+const parseJson = s => JSON.parse(String(s).replace(/^\uFEFF/, ''));
+// The local targets of a package.json "imports" map: require('#p') runs whatever "#p" points at.
+// Targets that name another package rather than a "./" path aren't files in this one.
+const localImports = p => {
+  const leaves = e => typeof e === 'string' ? [e] : Array.isArray(e) ? e.flatMap(leaves) : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
+  return leaves(p?.imports).filter(t => t.startsWith('./'));
+};
 
 // ---------- pnpm lockfile parsing (v6–v9) ----------
 // Collect name -> Set(version) from the top-level `packages:` section.
@@ -294,7 +302,7 @@ function addRefs(refs, text) {
   // it, and counting it would pull every bundle's (huge) map diff into the required code.
   text = text.replace(/^[ \t]*\/\/[#@][ \t]*sourceMappingURL=.*$/gm, '');
   for (const t of text.match(/[\w.@$-]+/g) ?? []) refs.tokens.add(t);
-  for (const m of text.matchAll(/[\w.@$-]*\/([\w.@$-]+)/g)) refs.tails.add(m[1]);
+  for (const m of text.matchAll(/\/([\w.@$-]+)/g)) refs.tails.add(m[1]);
 }
 const NODE_RESOLVED = /\.(js|json|node)$/i;
 // Does code with these refs name file p, with or without the extension Node would add?
@@ -313,11 +321,11 @@ export function refersTo(refs, p) {
 // them as path references: an extensionless "main": "payload" then resolves like require('./payload').
 export function manifestTargets(text) {
   let pkg;
-  try { pkg = JSON.parse(text); } catch { return ''; }
+  try { pkg = parseJson(text); } catch { return ''; }
   const leaves = e => typeof e === 'string' ? [e]
     : Array.isArray(e) ? e.flatMap(leaves)
     : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
-  return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...leaves(pkg?.exports), ...leaves(pkg?.bin)]
+  return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...leaves(pkg?.exports), ...leaves(pkg?.bin), ...localImports(pkg)]
     .filter(t => typeof t === 'string' && t.trim())
     .map(t => (t.startsWith('.') || t.startsWith('/') ? t : `./${t}`))
     .join('\n');
@@ -343,7 +351,7 @@ export function classifyPackageFiles(files) {
   }
   const pkgText = byName.get('package.json')?.toString('utf8') ?? '';
   let pkg = {};
-  try { pkg = JSON.parse(pkgText); } catch { /* shown raw below */ }
+  try { pkg = parseJson(pkgText); } catch { /* shown raw below */ }
   // Every runtime target in exports/bin; "types"/"typings" conditions never run, so skip them.
   const leaves = e => typeof e === 'string' ? [e]
     : Array.isArray(e) ? e.flatMap(leaves)
@@ -355,10 +363,10 @@ export function classifyPackageFiles(files) {
   const nested = [...byName.keys()].filter(f => f.endsWith('/package.json'));
   const manifests = [['.', pkg], ...nested.map(f => {
     let json = {};
-    try { json = JSON.parse(byName.get(f).toString('utf8')); } catch { /* shown raw as code */ }
+    try { json = parseJson(byName.get(f).toString('utf8')); } catch { /* shown raw as code */ }
     return [posix.dirname(f), json];
   })];
-  const targets = ([dir, p]) => [...leaves(p?.exports), p?.main, p?.module, typeof p?.browser === 'string' ? p.browser : null, ...leaves(p?.bin)]
+  const targets = ([dir, p]) => [...leaves(p?.exports), p?.main, p?.module, typeof p?.browser === 'string' ? p.browser : null, ...leaves(p?.bin), ...localImports(p)]
     .filter(t => typeof t === 'string' && t.trim() !== '') // an empty main means a types-only package
     .map(t => ({ dir, t }));
   const allTargets = manifests.flatMap(targets);
@@ -814,8 +822,8 @@ async function main() {
   const direct = new Set();
   const specChanges = []; // { file, name } for every dependency whose spec changed
   for (const f of changed.filter(f => f.endsWith('package.json'))) {
-    const o = JSON.parse(gitShow(baseSha, f) || '{}');
-    const n = JSON.parse(gitShow(headSha, f) || '{}');
+    const o = parseJson(gitShow(baseSha, f) || '{}');
+    const n = parseJson(gitShow(headSha, f) || '{}');
     for (const key of DEP_KEYS) {
       for (const [name, spec] of Object.entries(n[key] ?? {})) {
         if (o[key]?.[name] !== spec) { direct.add(name); specChanges.push({ file: f, name }); }

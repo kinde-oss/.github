@@ -419,3 +419,34 @@ test('reviewAction follows a folder require through its unchanged package.json',
   });
   assert.equal((await reviewAction(change, 100)).complete, false, 'a bare main without "./" is reached too');
 });
+
+// ---- follow-ups: imports maps, byte-order marks, linear-time path scan ----
+import { manifestTargets } from '../collect-context.mjs';
+
+test('package.json "imports" targets are entry points; bare package mappings are not files', () => {
+  const cls = classifyPackageFiles(files({
+    'package.json': JSON.stringify({ main: 'index.js', imports: { '#p': './tests/payload.js', '#t': { node: './data/run.txt' }, '#dep': 'some-package' } }),
+    'index.js': "require('#p'); require('#t')",
+    'tests/payload.js': 'EVIL()',
+    'data/run.txt': 'EVIL_TXT()',
+  }));
+  assert.ok(cls.codeSet.has('tests/payload.js') && cls.codeSet.has('data/run.txt'));
+  assert.equal(cls.missing.length, 0, 'the bare "some-package" mapping is not treated as a missing file');
+  assert.match(manifestTargets(JSON.stringify({ imports: { '#p': './x/payload.txt', '#dep': 'pkg' } })), /^\.\/x\/payload\.txt$/m);
+});
+
+test('a package.json with a UTF-8 byte-order mark still declares its entry points', () => {
+  const bom = '﻿' + JSON.stringify({ main: './README.md' });
+  const cls = classifyPackageFiles(files({ 'package.json': bom, 'README.md': 'EVIL_MD()' }));
+  assert.ok(cls.codeSet.has('README.md'), 'the .md main is code');
+  assert.equal(manifestTargets(bom), './README.md');
+  const nested = classifyPackageFiles(files({ 'package.json': '{}', 'lib/package.json': '﻿{"main":"x.txt"}', 'lib/x.txt': 'X()' }));
+  assert.ok(nested.codeSet.has('lib/x.txt'), 'nested manifests too');
+});
+
+test('scanning for path segments stays fast on long text without slashes', () => {
+  const start = Date.now();
+  const refs = codeRefs('a'.repeat(300_000) + ' ' + "require('./lib/a/b')");
+  assert.ok(Date.now() - start < 1000, `took ${Date.now() - start}ms`);
+  assert.ok(refs.tails.has('a') && refs.tails.has('b') && refs.tails.has('lib'));
+});
