@@ -2,6 +2,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { splitGitDiff, fitDiff, reviewNpmDiff, classifyPackageFiles, parseActionRuns, reviewAction } from '../collect-context.mjs';
+import { inspectPackageFiles } from '../collect-context.mjs';
 
 const fileDiff = (path, body, extra = '') => `diff --git a/${path} b/${path}\n${extra}index v1..v2 100644\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${body}`;
 const files = obj => Object.entries(obj).map(([name, body]) => ({ name: `package/${name}`, body: Buffer.from(body) }));
@@ -449,4 +450,22 @@ test('scanning for path segments stays fast on long text without slashes', () =>
   const refs = codeRefs('a'.repeat(300_000) + ' ' + "require('./lib/a/b')");
   assert.ok(Date.now() - start < 1000, `took ${Date.now() - start}ms`);
   assert.ok(refs.tails.has('a') && refs.tails.has('b') && refs.tails.has('lib'));
+});
+
+test('a pattern that names an asset extension makes those assets code; a generic one does not', () => {
+  const cls = classifyPackageFiles(files({
+    'package.json': JSON.stringify({ imports: { '#p/*': './assets/*.png' }, exports: { './*': './*' } }),
+    'assets/payload.png': 'EVIL_AS_JS()',
+    'logo.png': 'png',
+  }));
+  assert.ok(cls.codeSet.has('assets/payload.png'), "require('#p/payload') runs assets/payload.png as JavaScript");
+  assert.ok(!cls.codeSet.has('logo.png'), '"./*" still skips images');
+});
+
+test('"types" conditions in imports and exports are not runtime entry points', () => {
+  const pkg = JSON.stringify({ main: 'index.js', imports: { '#internal': { types: './types/internal.d.ts', default: './lib/internal.js' } } });
+  const r = inspectPackageFiles(files({ 'package.json': pkg, 'index.js': "require('#internal')", 'lib/internal.js': 'I()', 'types/internal.d.ts': 'x'.repeat(30_000) }));
+  assert.equal(r.inspected, true, 'a large declaration file does not use the code budget');
+  assert.ok(r.text.includes('I()'), 'the default target is still code');
+  assert.equal(manifestTargets(JSON.stringify({ exports: { '.': { types: './a.d.ts', default: './a.js' } } })), './a.js');
 });

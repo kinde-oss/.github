@@ -43,10 +43,12 @@ const truncate = (s, n) => (s.length > n ? s.slice(0, n) + `\n… [truncated ${s
 const parseJson = s => JSON.parse(String(s).replace(/^\uFEFF/, ''));
 // The local targets of a package.json "imports" map: require('#p') runs whatever "#p" points at.
 // Targets that name another package rather than a "./" path aren't files in this one.
-const localImports = p => {
-  const leaves = e => typeof e === 'string' ? [e] : Array.isArray(e) ? e.flatMap(leaves) : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
-  return leaves(p?.imports).filter(t => t.startsWith('./'));
-};
+// Runtime targets of an exports/imports/bin value: every string leaf, skipping "types"/"typings"
+// conditions, which Node ignores (they only feed type checkers).
+const runtimeLeaves = e => typeof e === 'string' ? [e]
+  : Array.isArray(e) ? e.flatMap(runtimeLeaves)
+  : e && typeof e === 'object' ? Object.entries(e).filter(([k]) => k !== 'types' && k !== 'typings').flatMap(([, v]) => runtimeLeaves(v)) : [];
+const localImports = p => runtimeLeaves(p?.imports).filter(t => t.startsWith('./'));
 
 // ---------- pnpm lockfile parsing (v6–v9) ----------
 // Collect name -> Set(version) from the top-level `packages:` section.
@@ -322,10 +324,7 @@ export function refersTo(refs, p) {
 export function manifestTargets(text) {
   let pkg;
   try { pkg = parseJson(text); } catch { return ''; }
-  const leaves = e => typeof e === 'string' ? [e]
-    : Array.isArray(e) ? e.flatMap(leaves)
-    : e && typeof e === 'object' ? Object.values(e).flatMap(leaves) : [];
-  return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...leaves(pkg?.exports), ...leaves(pkg?.bin), ...localImports(pkg)]
+  return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...runtimeLeaves(pkg?.exports), ...runtimeLeaves(pkg?.bin), ...localImports(pkg)]
     .filter(t => typeof t === 'string' && t.trim())
     .map(t => (t.startsWith('.') || t.startsWith('/') ? t : `./${t}`))
     .join('\n');
@@ -381,11 +380,13 @@ export function classifyPackageFiles(files) {
   // file they match importable, so each match is an entry point. A pattern that matches nothing
   // isn't an error: it just exposes no files.
   const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // A pattern that itself names an asset extension ("./assets/*.png") makes those assets loadable,
+  // and Node runs them as JavaScript; a generic one ("./*") still skips images, fonts and media.
   const patterns = allTargets.filter(pattern).map(({ dir, t }) => {
     const p = posix.join(dir, t.replace(/^\.?\//, ''));
-    return new RegExp(`^${p.split('*').map(escapeRe).join('.+')}${p.endsWith('/') ? '.+' : ''}$`);
+    return { re: new RegExp(`^${p.split('*').map(escapeRe).join('.+')}${p.endsWith('/') ? '.+' : ''}$`), asset: INERT_ASSET.test(t) };
   });
-  const patterned = names.filter(f => !INERT_ASSET.test(f) && patterns.some(re => re.test(f)));
+  const patterned = names.filter(f => patterns.some(({ re, asset }) => re.test(f) && (asset || !INERT_ASSET.test(f))));
   const entries = new Set([...[...declared, 'index.js'].map(resolve).filter(Boolean), ...patterned]);
   const nestedSet = new Set(nested);
   const direct = new Set(names.filter(f => entries.has(f) || nestedSet.has(f) || !isOptional(f)));
