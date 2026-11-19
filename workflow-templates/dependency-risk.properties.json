@@ -1,0 +1,6 @@
+{
+  "name": "Dependency risk check",
+  "description": "AI and metadata review of Renovate PRs. Blocks auto-merge on risky dependency updates.",
+  "iconName": "octicon shield-check",
+  "categories": ["Security", "JavaScript", "TypeScript"]
+}

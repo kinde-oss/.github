@@ -1,0 +1,30 @@
+# Runs the dependency-risk test suite. Every repo calling the reusable workflow loads these
+# scripts from main, so a regression here changes every repo's gate.
+name: dependency-risk tests
+
+on:
+  pull_request:
+    paths:
+      - 'dependency-risk/**'
+      - '.github/workflows/dependency-risk*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'dependency-risk/**'
+      - '.github/workflows/dependency-risk*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test 'dependency-risk/test/*.test.mjs'
