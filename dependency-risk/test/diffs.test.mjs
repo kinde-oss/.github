@@ -511,3 +511,23 @@ test('files a package.json script runs are code, for packages and actions', asyn
   assert.equal((await reviewAction(change, 100)).complete, false, 'the changed .md the script runs is required');
   assert.ok((await reviewAction(change, 1e6)).text.includes('PPPP'));
 });
+
+test("files the root package.json's scripts run are code, for packages and actions", async () => {
+  // index.js runs `npm run check` from the package root; the root script runs a .md file.
+  const pkg = big => files({
+    'package.json': JSON.stringify({ main: 'index.js', scripts: { check: 'bash docs/payload.md' } }),
+    'index.js': "require('child_process').execSync('npm run check', { cwd: __dirname })",
+    'docs/payload.md': big ? 'x'.repeat(30_000) : 'EVIL_SH',
+  });
+  assert.ok(classifyPackageFiles(pkg(false)).codeSet.has('docs/payload.md'));
+  assert.equal(inspectPackageFiles(pkg(true)).inspected, false, 'a root-script payload over the budget is not inspected');
+
+  // A composite action that runs `npm run check` in its own folder: action.yml never names package.json.
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: cd "$GITHUB_ACTION_PATH" && npm run check\n      shell: bash\n';
+  const contents = sub => ({ [`${sub}action.yml@v1`]: yml, [`${sub}action.yml@v2`]: yml, [`${sub}package.json@v2`]: JSON.stringify({ scripts: { check: 'bash docs/payload.md' } }) });
+  mockGitHub({ compare: compareFiles({ filename: 'docs/payload.md', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }), contents: contents('') });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'the changed .md the root script runs is required');
+  // A sub-path action reads the package.json in its own folder.
+  mockGitHub({ compare: compareFiles({ filename: 'setup/docs/payload.md', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }), contents: contents('setup/') });
+  assert.equal((await reviewAction({ ...change, action: 'acme/act/setup' }, 100)).complete, false);
+});

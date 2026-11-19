@@ -398,7 +398,8 @@ export function classifyPackageFiles(files) {
   // another file in turn, and each one it reaches runs too.
   // A manifest only runs what its runtime fields and scripts name, so scan just those (not "types").
   const refText = f => (nestedSet.has(f) ? manifestTargets(byName.get(f).toString('utf8')) : byName.get(f).toString('utf8'));
-  const refs = codeRefs([...direct].map(refText).join('\n'));
+  // The root manifest's scripts run too when the code calls `npm run` from the package root.
+  const refs = codeRefs([manifestTargets(pkgText), ...[...direct].map(refText)].join('\n'));
   const reached = new Set();
   for (let grew = true; grew;) {
     grew = false;
@@ -702,6 +703,13 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
       else { complete = false; notes.push(`entry file ${e} not found at the new ref`); }
     } catch (err) { complete = false; notes.push(`could not read ${e}: ${err.message}`); }
   }
+  // `npm run` in the action folder runs the root package.json's scripts, which action.yml never
+  // names, so its runtime fields and scripts are references from the start.
+  const rootManifest = at('package.json');
+  try {
+    const body = await ghFile(owner, repo, rootManifest, c.to.ref);
+    if (body) refText += '\n' + manifestTargets(body.toString('utf8'));
+  } catch (err) { complete = false; notes.push(`could not read ${rootManifest}: ${err.message}`); }
   const refs = codeRefs(refText);
 
   // Follow literal references through the files they reach, changed or not: an unchanged
@@ -715,7 +723,7 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
     tree = (t.tree ?? []).filter(e => e.type === 'blob').map(e => e.path);
     if (t.truncated) { complete = false; notes.push('the repository file list was truncated, so references could not all be followed'); }
   } catch (err) { complete = false; notes.push(`could not list the repository's files: ${err.message}`); }
-  const alreadyRead = new Set([...ymls, ...entries]);
+  const alreadyRead = new Set([...ymls, ...entries, rootManifest]);
   let reads = 0, capped = false;
   for (let grew = true; grew;) {
     grew = false;
