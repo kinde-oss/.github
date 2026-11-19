@@ -532,7 +532,7 @@ test("files the root package.json's scripts run are code, for packages and actio
   assert.equal((await reviewAction({ ...change, action: 'acme/act/setup' }, 100)).complete, false);
 });
 
-test('a file a script runs is code even with an image extension; a mention in code is not', async () => {
+test('a file a script runs is code even with an image extension, and so is one code names', async () => {
   const pkg = body => files({
     'package.json': JSON.stringify({ main: 'index.js', scripts: { check: 'bash docs/payload.png' } }),
     'index.js': "require('child_process').execSync('npm run check', { cwd: __dirname }); // logo.png",
@@ -541,8 +541,7 @@ test('a file a script runs is code even with an image extension; a mention in co
   });
   const cls = classifyPackageFiles(pkg('EVIL_SH'));
   assert.ok(cls.codeSet.has('docs/payload.png'), 'the script runs it');
-  assert.ok(!cls.codeSet.has('logo.png'), 'code that only mentions an image does not make it code');
-  assert.equal(inspectPackageFiles(pkg('EVIL_SH')).inspected, true);
+  assert.ok(cls.codeSet.has('logo.png'), 'code that names an image may run it, so it counts too');
   assert.ok(inspectPackageFiles(pkg('EVIL_SH')).text.includes('EVIL_SH'));
   assert.equal(inspectPackageFiles(pkg('\0binary')).inspected, false, 'a binary one cannot be inspected');
 
@@ -585,4 +584,44 @@ test('without a classified tarball, a changed image counts too, since a script m
     assert.ok(reviewNpmDiff(text, newFiles, 1e6).text.includes('XXXX'), 'a fitting one is shown');
     assert.equal(reviewNpmDiff(binary, newFiles, 1e6).complete, false, 'a binary one cannot be shown');
   }
+});
+
+test('names with characters the token pattern splits on are matched literally', async () => {
+  const pkg = files({
+    'package.json': JSON.stringify({ main: 'index.js', scripts: { check: 'bash docs/payload+one.png' } }),
+    'index.js': "require('child_process').execSync('npm run check', { cwd: __dirname })",
+    'docs/payload+one.png': 'EVIL_SH',
+    'docs/other+two.png': 'png',
+  });
+  const cls = classifyPackageFiles(pkg);
+  assert.ok(cls.codeSet.has('docs/payload+one.png'), 'the script names it');
+  assert.ok(!cls.codeSet.has('docs/other+two.png'), 'a name nothing mentions is still not code');
+  const diff = fileDiff('docs/payload+one.png', `+${'X'.repeat(500)}`);
+  assert.equal(reviewNpmDiff(diff, { files: pkg, unsupported: [] }, 100).complete, false);
+
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: bash "docs/payload+one.png"\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: 'docs/payload+one.png', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false);
+});
+
+test('a file named by a helper script that a command runs is code, whatever its extension', async () => {
+  const pkg = files({
+    'package.json': JSON.stringify({ main: 'index.js', scripts: { check: 'bash scripts/loader.sh' } }),
+    'index.js': "require('child_process').execSync('npm run check', { cwd: __dirname })",
+    'scripts/loader.sh': 'bash docs/payload.png',
+    'docs/payload.png': 'EVIL_SH',
+  });
+  assert.ok(classifyPackageFiles(pkg).codeSet.has('docs/payload.png'));
+  const diff = fileDiff('docs/payload.png', `+${'X'.repeat(500)}`);
+  assert.equal(reviewNpmDiff(diff, { files: pkg, unsupported: [] }, 100).complete, false);
+
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: npm run check\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: 'docs/payload.png', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml, 'package.json@v2': JSON.stringify({ scripts: { check: 'bash scripts/loader.sh' } }), 'scripts/loader.sh@v2': 'bash docs/payload.png' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'followed through the unchanged helper');
 });

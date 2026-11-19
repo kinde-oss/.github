@@ -294,8 +294,10 @@ const skippableInDiff = p => DIFF_SKIPPABLE.test(p) || INERT_ASSET.test(p);
 // Every name-like token in some code, so "does the code mention notes.md" is a set lookup.
 // Also the last segment of every path-like string, because Node resolves require('../lib/payload')
 // to payload.js, payload.json or payload.node, and require('./lib') to lib/index.js.
+// The text itself is kept too: a name with characters the token pattern splits on
+// ("payload+one.png") is matched literally instead.
 export function codeRefs(text = '') {
-  const refs = { tokens: new Set(), tails: new Set() };
+  const refs = { tokens: new Set(), tails: new Set(), texts: [] };
   addRefs(refs, text);
   return refs;
 }
@@ -303,20 +305,25 @@ function addRefs(refs, text) {
   // A "//# sourceMappingURL=index.js.map" comment points tools at a source map; it doesn't load
   // it, and counting it would pull every bundle's (huge) map diff into the required code.
   text = text.replace(/^[ \t]*\/\/[#@][ \t]*sourceMappingURL=.*$/gm, '');
+  refs.texts.push(text);
   for (const t of text.match(/[\w.@$-]+/g) ?? []) refs.tokens.add(t);
   for (const m of text.matchAll(/\/([\w.@$-]+)/g)) refs.tails.add(m[1]);
 }
 const NODE_RESOLVED = /\.(js|json|node)$/i;
+const PLAIN_NAME = /^[\w.@$-]+$/;
 // Does code with these refs name file p, with or without the extension Node would add?
+// Any extension counts: a command runs whatever it names ("bash docs/payload.png"), and Node runs
+// an unknown extension as JavaScript.
 export function refersTo(refs, p) {
+  const has = (set, name) => (PLAIN_NAME.test(name) ? set.has(name) : refs.texts.some(t => t.includes(name)));
   const parts = p.split('/');
   const base = parts.at(-1);
-  if (refs.tokens.has(base)) return true;
+  if (has(refs.tokens, base)) return true;
   if (!NODE_RESOLVED.test(base)) return false;
   const stem = base.replace(NODE_RESOLVED, '');
   // require('./lib/loader') also reads lib/loader/package.json, whose main says what runs.
-  const folderEntry = (stem === 'index' || base === 'package.json') && parts.length > 1 && refs.tails.has(parts.at(-2));
-  return refs.tails.has(stem) || folderEntry;
+  const folderEntry = (stem === 'index' || base === 'package.json') && parts.length > 1 && has(refs.tails, parts.at(-2));
+  return has(refs.tails, stem) || folderEntry;
 }
 
 // The entry points a package.json declares, as relative paths ("./x"), so that reading one adds
@@ -332,10 +339,8 @@ export function manifestTargets(text) {
     .concat(manifestScripts(text) || [])
     .join('\n');
 }
-// Just the commands in a package.json's "scripts". A command runs whatever file it names, an image
-// extension included ("bash docs/payload.png"), so files named here are followed even when they
-// look like assets, which a mention in code ("logo.png") doesn't make code.
-export function manifestScripts(text) {
+// Just the commands in a package.json's "scripts".
+function manifestScripts(text) {
   let pkg;
   try { pkg = parseJson(text); } catch { return ''; }
   return pkg?.scripts && typeof pkg.scripts === 'object' ? Object.values(pkg.scripts).filter(c => typeof c === 'string').join('\n') : '';
@@ -407,13 +412,11 @@ export function classifyPackageFiles(files) {
   const refText = f => (nestedSet.has(f) ? manifestTargets(byName.get(f).toString('utf8')) : byName.get(f).toString('utf8'));
   // The root manifest's scripts run too when the code calls `npm run` from the package root.
   const refs = codeRefs([manifestTargets(pkgText), ...[...direct].map(refText)].join('\n'));
-  const scriptRefs = codeRefs([pkgText, ...nested.map(f => byName.get(f).toString('utf8'))].map(manifestScripts).join('\n'));
-  const followable = f => !INERT_ASSET.test(f) || refersTo(scriptRefs, f);
   const reached = new Set();
   for (let grew = true; grew;) {
     grew = false;
     for (const f of names) {
-      if (direct.has(f) || reached.has(f) || !followable(f) || !refersTo(refs, f)) continue;
+      if (direct.has(f) || reached.has(f) || !refersTo(refs, f)) continue;
       reached.add(f);
       addRefs(refs, byName.get(f).toString('utf8'));
       grew = true;
@@ -715,19 +718,12 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   }
   // `npm run` in the action folder runs the root package.json's scripts, which action.yml never
   // names, so its runtime fields and scripts are references from the start.
-  // Commands (run: steps and package.json scripts) run whatever file they name, an image
-  // extension included, so files they name are followed even when they look like assets.
-  const scriptRefs = codeRefs(yml?.toString('utf8') ?? '');
   const rootManifest = at('package.json');
   try {
     const body = await ghFile(owner, repo, rootManifest, c.to.ref);
-    if (body) {
-      refText += '\n' + manifestTargets(body.toString('utf8'));
-      addRefs(scriptRefs, manifestScripts(body.toString('utf8')));
-    }
+    if (body) refText += '\n' + manifestTargets(body.toString('utf8'));
   } catch (err) { complete = false; notes.push(`could not read ${rootManifest}: ${err.message}`); }
   const refs = codeRefs(refText);
-  const followable = p => !INERT_ASSET.test(p) || refersTo(scriptRefs, p);
 
   // Follow literal references through the files they reach, changed or not: an unchanged
   // lib/loader.js can load a changed payload of any extension (CommonJS runs unknown ones as
@@ -745,7 +741,7 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   for (let grew = true; grew;) {
     grew = false;
     const toRead = [];
-    for (const p of tree.filter(x => !reached.has(x) && followable(x) && refersTo(refs, x))) {
+    for (const p of tree.filter(x => !reached.has(x) && refersTo(refs, x))) {
       reached.add(p);
       grew = true;
       if (alreadyRead.has(p) || BINARY_EXT.test(p)) continue;
@@ -764,12 +760,11 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
         if (!body || body.includes(0)) return;
         const text = body.toString('utf8');
         addRefs(refs, batch[k].endsWith('package.json') ? manifestTargets(text) : text); // runtime fields and scripts, not "types"
-        if (batch[k].endsWith('package.json')) addRefs(scriptRefs, manifestScripts(text));
       });
     }
   }
   if (capped) { complete = false; notes.push(`the runtime code reaches more than ${MAX_REF_FETCHES} files, so not every reference was followed`); }
-  const referenced = p => reached.has(p) || (followable(p) && refersTo(refs, p));
+  const referenced = p => reached.has(p) || refersTo(refs, p);
   // The action repo's own CI never runs for users; a composite action's run: steps can still
   // execute files kept under .github/, so for those only the workflow YAML itself is excluded.
   const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(p));
