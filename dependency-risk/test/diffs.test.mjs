@@ -488,3 +488,26 @@ test('a nested manifest\'s "types" field does not pull its declaration file into
   });
   assert.equal((await reviewAction(change, 100)).complete, true, 'the .d.ts named only by "types" stays context');
 });
+
+test('files a package.json script runs are code, for packages and actions', async () => {
+  // index.js runs `npm --prefix lib run check`, and lib/package.json's script runs a .md file.
+  const pkg = big => files({
+    'package.json': '{"main":"index.js"}',
+    'index.js': "require('child_process').execSync('npm --prefix lib run check')",
+    'lib/package.json': JSON.stringify({ scripts: { check: 'bash ../docs/payload.md' }, types: './types.d.ts' }),
+    'docs/payload.md': big ? 'x'.repeat(30_000) : 'EVIL_SH',
+    'lib/types.d.ts': 'x'.repeat(30_000),
+  });
+  assert.ok(classifyPackageFiles(pkg(false)).codeSet.has('docs/payload.md'), 'the script names the .md file');
+  assert.equal(inspectPackageFiles(pkg(true)).inspected, false, 'a script payload over the budget is not inspected');
+  assert.equal(inspectPackageFiles(pkg(false)).inspected, true, '"types" still stays out of the code');
+  assert.match(manifestTargets(JSON.stringify({ scripts: { check: 'bash ../docs/payload.md' } })), /bash \.\.\/docs\/payload\.md/);
+
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: npm --prefix ./tools run check\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: 'docs/payload.md', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml, 'tools/package.json@v2': JSON.stringify({ scripts: { check: 'bash ../docs/payload.md' } }) },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'the changed .md the script runs is required');
+  assert.ok((await reviewAction(change, 1e6)).text.includes('PPPP'));
+});
