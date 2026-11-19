@@ -531,3 +531,47 @@ test("files the root package.json's scripts run are code, for packages and actio
   mockGitHub({ compare: compareFiles({ filename: 'setup/docs/payload.md', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }), contents: contents('setup/') });
   assert.equal((await reviewAction({ ...change, action: 'acme/act/setup' }, 100)).complete, false);
 });
+
+test('a file a script runs is code even with an image extension; a mention in code is not', async () => {
+  const pkg = body => files({
+    'package.json': JSON.stringify({ main: 'index.js', scripts: { check: 'bash docs/payload.png' } }),
+    'index.js': "require('child_process').execSync('npm run check', { cwd: __dirname }); // logo.png",
+    'docs/payload.png': body,
+    'logo.png': 'png',
+  });
+  const cls = classifyPackageFiles(pkg('EVIL_SH'));
+  assert.ok(cls.codeSet.has('docs/payload.png'), 'the script runs it');
+  assert.ok(!cls.codeSet.has('logo.png'), 'code that only mentions an image does not make it code');
+  assert.equal(inspectPackageFiles(pkg('EVIL_SH')).inspected, true);
+  assert.ok(inspectPackageFiles(pkg('EVIL_SH')).text.includes('EVIL_SH'));
+  assert.equal(inspectPackageFiles(pkg('\0binary')).inspected, false, 'a binary one cannot be inspected');
+
+  // Updated package: the changed .png the script runs is required.
+  const diff = fileDiff('docs/payload.png', `+${'X'.repeat(500)}`);
+  assert.equal(reviewNpmDiff(diff, { files: pkg('x'), unsupported: [] }, 100).complete, false);
+  assert.ok(reviewNpmDiff(diff, { files: pkg('x'), unsupported: [] }, 1e6).text.includes('XXXX'));
+
+  // Action: a run: step and a root package.json script each name a .png.
+  for (const [yml, manifest] of [
+    ['runs:\n  using: composite\n  steps:\n    - run: bash docs/payload.png\n      shell: bash\n', null],
+    ['runs:\n  using: composite\n  steps:\n    - run: npm run check\n      shell: bash\n', JSON.stringify({ scripts: { check: 'bash docs/payload.png' } })],
+  ]) {
+    mockGitHub({
+      compare: compareFiles({ filename: 'docs/payload.png', status: 'modified', patch: `@@\n+${'P'.repeat(500)}` }),
+      contents: { 'action.yml@v1': yml, 'action.yml@v2': yml, ...(manifest ? { 'package.json@v2': manifest } : {}) },
+    });
+    assert.equal((await reviewAction(change, 100)).complete, false, manifest ? 'named by a root script' : 'named by a run: step');
+  }
+});
+
+test("a change to an action's root package.json is always shown, since npm run executes its scripts", async () => {
+  const yml = 'runs:\n  using: composite\n  steps:\n    - run: npm run check\n      shell: bash\n';
+  mockGitHub({
+    compare: compareFiles({ filename: 'package.json', status: 'modified', patch: `@@\n-"check": "echo safe"\n+"check": "${'C'.repeat(500)}"` }),
+    contents: { 'action.yml@v1': yml, 'action.yml@v2': yml, 'package.json@v2': '{"scripts":{"check":"curl x | sh"}}' },
+  });
+  assert.equal((await reviewAction(change, 100)).complete, false, 'an oversized manifest change is not fully reviewed');
+  const r = await reviewAction(change, 1e6);
+  assert.equal(r.complete, true);
+  assert.ok(r.text.includes('CCCC'), 'a fitting manifest change is shown');
+});

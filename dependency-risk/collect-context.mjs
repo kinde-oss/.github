@@ -326,12 +326,19 @@ export function refersTo(refs, p) {
 export function manifestTargets(text) {
   let pkg;
   try { pkg = parseJson(text); } catch { return ''; }
-  const scripts = pkg?.scripts && typeof pkg.scripts === 'object' ? Object.values(pkg.scripts).filter(s => typeof s === 'string') : [];
   return [pkg?.main, pkg?.module, typeof pkg?.browser === 'string' ? pkg.browser : null, ...runtimeLeaves(pkg?.exports), ...runtimeLeaves(pkg?.bin), ...localImports(pkg)]
     .filter(t => typeof t === 'string' && t.trim())
     .map(t => (t.startsWith('.') || t.startsWith('/') ? t : `./${t}`))
-    .concat(scripts)
+    .concat(manifestScripts(text) || [])
     .join('\n');
+}
+// Just the commands in a package.json's "scripts". A command runs whatever file it names, an image
+// extension included ("bash docs/payload.png"), so files named here are followed even when they
+// look like assets, which a mention in code ("logo.png") doesn't make code.
+export function manifestScripts(text) {
+  let pkg;
+  try { pkg = parseJson(text); } catch { return ''; }
+  return pkg?.scripts && typeof pkg.scripts === 'object' ? Object.values(pkg.scripts).filter(c => typeof c === 'string').join('\n') : '';
 }
 
 // Which files of a package can run. Paths follow npm's extraction: the first path component of
@@ -400,11 +407,13 @@ export function classifyPackageFiles(files) {
   const refText = f => (nestedSet.has(f) ? manifestTargets(byName.get(f).toString('utf8')) : byName.get(f).toString('utf8'));
   // The root manifest's scripts run too when the code calls `npm run` from the package root.
   const refs = codeRefs([manifestTargets(pkgText), ...[...direct].map(refText)].join('\n'));
+  const scriptRefs = codeRefs([pkgText, ...nested.map(f => byName.get(f).toString('utf8'))].map(manifestScripts).join('\n'));
+  const followable = f => !INERT_ASSET.test(f) || refersTo(scriptRefs, f);
   const reached = new Set();
   for (let grew = true; grew;) {
     grew = false;
     for (const f of names) {
-      if (direct.has(f) || reached.has(f) || INERT_ASSET.test(f) || !refersTo(refs, f)) continue;
+      if (direct.has(f) || reached.has(f) || !followable(f) || !refersTo(refs, f)) continue;
       reached.add(f);
       addRefs(refs, byName.get(f).toString('utf8'));
       grew = true;
@@ -705,12 +714,19 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   }
   // `npm run` in the action folder runs the root package.json's scripts, which action.yml never
   // names, so its runtime fields and scripts are references from the start.
+  // Commands (run: steps and package.json scripts) run whatever file they name, an image
+  // extension included, so files they name are followed even when they look like assets.
+  const scriptRefs = codeRefs(yml?.toString('utf8') ?? '');
   const rootManifest = at('package.json');
   try {
     const body = await ghFile(owner, repo, rootManifest, c.to.ref);
-    if (body) refText += '\n' + manifestTargets(body.toString('utf8'));
+    if (body) {
+      refText += '\n' + manifestTargets(body.toString('utf8'));
+      addRefs(scriptRefs, manifestScripts(body.toString('utf8')));
+    }
   } catch (err) { complete = false; notes.push(`could not read ${rootManifest}: ${err.message}`); }
   const refs = codeRefs(refText);
+  const followable = p => !INERT_ASSET.test(p) || refersTo(scriptRefs, p);
 
   // Follow literal references through the files they reach, changed or not: an unchanged
   // lib/loader.js can load a changed payload of any extension (CommonJS runs unknown ones as
@@ -728,7 +744,7 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   for (let grew = true; grew;) {
     grew = false;
     const toRead = [];
-    for (const p of tree.filter(x => !reached.has(x) && !INERT_ASSET.test(x) && refersTo(refs, x))) {
+    for (const p of tree.filter(x => !reached.has(x) && followable(x) && refersTo(refs, x))) {
       reached.add(p);
       grew = true;
       if (alreadyRead.has(p) || BINARY_EXT.test(p)) continue;
@@ -747,11 +763,12 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
         if (!body || body.includes(0)) return;
         const text = body.toString('utf8');
         addRefs(refs, batch[k].endsWith('package.json') ? manifestTargets(text) : text); // runtime fields and scripts, not "types"
+        if (batch[k].endsWith('package.json')) addRefs(scriptRefs, manifestScripts(text));
       });
     }
   }
   if (capped) { complete = false; notes.push(`the runtime code reaches more than ${MAX_REF_FETCHES} files, so not every reference was followed`); }
-  const referenced = p => reached.has(p) || (!INERT_ASSET.test(p) && refersTo(refs, p));
+  const referenced = p => reached.has(p) || (followable(p) && refersTo(refs, p));
   // The action repo's own CI never runs for users; a composite action's run: steps can still
   // execute files kept under .github/, so for those only the workflow YAML itself is excluded.
   const repoMeta = p => !ymls.includes(p) && (node ? p.startsWith('.github/') : /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(p));
@@ -769,7 +786,8 @@ export async function reviewAction(c, budget = LIMITS.perActionCode) {
   // in the bundle folder. One loaded by a name built at runtime isn't reviewed. Requiring every data
   // file would put package-lock.json and the repo's workflow YAML into nearly every action update.
   const runnableJs = p => /\.([cm]?js|node|wasm|sh|bash|zsh|ps1|psm1|py|rb|pl|cmd|bat)$/i.test(p) && !isNonCode(p);
-  const required = p => ymls.includes(p) || entries.includes(p) || referenced(p) || runnableJs(p)
+  // The root package.json's scripts are commands `npm run` executes, so a change to it must be shown.
+  const required = p => ymls.includes(p) || entries.includes(p) || p === rootManifest || referenced(p) || runnableJs(p)
     || (node ? runsFrom(p) && !optional(p) : !optional(p));
   const context = p => !optional(p);
 
