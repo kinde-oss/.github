@@ -575,3 +575,14 @@ test("a change to an action's root package.json is always shown, since npm run e
   assert.equal(r.complete, true);
   assert.ok(r.text.includes('CCCC'), 'a fitting manifest change is shown');
 });
+
+test('without a classified tarball, a changed image counts too, since a script may run it', () => {
+  const pkg = { files: files({ 'package.json': JSON.stringify({ scripts: { check: 'bash docs/payload.png' } }), 'docs/payload.png': 'x' }), unsupported: [] };
+  const text = fileDiff('docs/payload.png', `+${'X'.repeat(500)}`);
+  const binary = 'diff --git a/docs/payload.png b/docs/payload.png\nBinary files a/docs/payload.png and b/docs/payload.png differ';
+  for (const newFiles of [null, { ...pkg, unsupported: ['x (type L)'] }]) {
+    assert.equal(reviewNpmDiff(text, newFiles, 100).complete, false, 'an oversized image change is not fully reviewed');
+    assert.ok(reviewNpmDiff(text, newFiles, 1e6).text.includes('XXXX'), 'a fitting one is shown');
+    assert.equal(reviewNpmDiff(binary, newFiles, 1e6).complete, false, 'a binary one cannot be shown');
+  }
+});

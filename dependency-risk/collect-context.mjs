@@ -522,13 +522,14 @@ export function newPackageSource(name, version) {
 
 // The npm diff of an updated package, fitted so every changed file that runs is shown in full.
 // Which files run comes from the new version's own tarball; if that can't be read cleanly,
-// every changed file except images, fonts and media counts. Changed data files always count:
+// every changed file counts, images, fonts and media included, since a package.json script that
+// can't be seen may run one (a binary one then means not fully reviewed). Changed data files always count:
 // unchanged code can load them by a name built at runtime, which no reference check can see.
 export function reviewNpmDiff(diff, newFiles, budget = LIMITS.perPackageCode) {
   const cls = newFiles && !newFiles.unsupported.length ? classifyPackageFiles(newFiles.files) : null;
   const required = cls
     ? p => cls.codeSet.has(p) || p === 'package.json' || p.endsWith('/package.json') || !skippableInDiff(p)
-    : p => !INERT_ASSET.test(p);
+    : () => true;
   return { ...fitDiff(splitGitDiff(diff), { required, budget }), classified: Boolean(cls) };
 }
 
